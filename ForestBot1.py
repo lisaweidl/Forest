@@ -36,6 +36,9 @@ import requests
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Optional
+from dotenv import load_dotenv
+import os
+load_dotenv()
 
 # web3 for Ethereum connection
 from web3 import Web3
@@ -56,43 +59,19 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 
 CONFIG = {
-    # Alchemy WebSocket URL for mempool streaming
-    # Format: wss://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
-    # Use HTTPS for polling if WebSocket is unavailable:
-    # Format: https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
-    "ALCHEMY_URL": "https://eth-mainnet.g.alchemy.com/v2/_IAXgmKEFq4LNb2TiWHSW",
-
-    # Anthropic API key
-    "ANTHROPIC_API_KEY": "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",
-
-    # Moltbook API key (from your agent registration)
-    "MOLTBOOK_API_KEY": "YOUR_MOLTBOOK_KEY_HERE",
-
-    # Moltbook submolt to post in — m/crypto is the crypto community
+    "ALCHEMY_URL": os.getenv("ALCHEMY_URL"),
+    "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY"),
+    "MOLTBOOK_API_KEY": os.getenv("MOLTBOOK_API_KEY"),
     "MOLTBOOK_SUBMOLT": "m/crypto",
-
-    # How often to check the mempool (seconds)
-    # 30 seconds matches how often Moltbook agents check their feed
     "POLL_INTERVAL_SECONDS": 30,
-
-    # How many pending transactions to scan per cycle
     "TXNS_PER_SCAN": 50,
-
-    # Minimum gas price (gwei) to bother analyzing
-    # Ignore dust transactions — focus on meaningful activity
     "MIN_GAS_GWEI": 10,
-
-    # Run in simulation mode (True = no real Moltbook posts, just prints)
-    # Set to False when you are ready to post for real
     "SIMULATION_MODE": True,
-
-    # Known DEX router addresses to watch
-    # These are the contracts where sandwich attacks happen
     "DEX_ROUTERS": {
         "uniswap_v2": "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
         "uniswap_v3": "0xE592427A0AEce92De3Edee1F18E0157C05861564",
-        "sushiswap": "0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F",
-        "curve": "0x99a58482BD75cbab83b27EC03CA68fF489b5788f",
+        "sushiswap":  "0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F",
+        "curve":      "0x99a58482BD75cbab83b27EC03CA68fF489b5788f",
     }
 }
 
