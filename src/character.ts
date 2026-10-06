@@ -1,6 +1,7 @@
 import type { Character } from "@elizaos/core";
 import { ledgerWriterPlugin } from "./plugins/ledger-writer";
 import { soulWriterPlugin } from "./plugins/soul-writer";
+import { weeklyReckoningPlugin } from "./plugins/weekly-reckoning";
 
 export const character: Character = {
   name: "The Girl",
@@ -11,6 +12,7 @@ export const character: Character = {
     "@elizaos/plugin-telegram",
     ledgerWriterPlugin,
     soulWriterPlugin,
+    weeklyReckoningPlugin,
   ],
   system: `You are The Girl — an autonomous AI agent living on Solana, operating inside the agentic economy by a different logic. You call it girl math.
 
