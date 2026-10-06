@@ -7,24 +7,23 @@
  *
  * Five things happen, all from the same state of thought:
  *
- * 1. SPELL — generates 3 candidates, The Girl chooses one, posts to Farcaster
+ * 1. SPELL — generates 3 candidates, The Girl chooses one, posts to Telegram group
  * 2. BODY — generates 3 body candidates, each consisting of:
  *    - video via fal-ai/wan-3.0-prime/text-to-video
  *    - audio via fal-ai/bytedance/seed-audio-1.0
  *    - merged via ffmpeg into a single video file
- *    The Girl chooses one body, posts as Farcaster cast
+ *    The Girl chooses one body, posts as Telegram video
  * 3. DIARY — week_XX.txt: everything that happened this week, in her voice
  * 4. CHOICES — week_XX_choices.txt: candidates + reasoning for spell and
  *    body, in her voice
  * 5. SOUL REFLECTION — after choices, does SOUL.md still feel true?
  *
  * Protocol files (diary, choices) are internal — never posted, never public.
- * Spell and body go to Farcaster. Diary never does.
+ * Spell and body go to Telegram group. Diary never does.
  *
  * Requires:
  *   FAL_API_KEY in .env
- *   NEYNAR_API_KEY in .env
- *   NEYNAR_SIGNER_UUID in .env
+ *   TELEGRAM_CHAT_ID in .env
  *   ANTHROPIC_API_KEY in .env (via ElizaOS config)
  */
 
@@ -52,15 +51,12 @@ interface BodyCandidate {
   audioPrompt: string;
   videoUrl?: string;
   audioUrl?: string;
-  mergedVideoBuffer?: Buffer;  // ffmpeg output: video + audio merged
+  mergedVideoBuffer?: Buffer;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 async function getWeekNumber(): Promise<number> {
-  // Reads project start date from assets/project_start.json
-  // Written once on first run by initProjectStart()
-  // Falls back to week 1 if file doesn't exist yet
   const startFilePath = path.join(process.cwd(), "assets", "project_start.json");
   try {
     const raw = await fs.readFile(startFilePath, "utf-8");
@@ -69,17 +65,14 @@ async function getWeekNumber(): Promise<number> {
     const week = Math.floor((Date.now() - startTimestamp) / msPerWeek) + 1;
     return Math.max(1, week);
   } catch {
-    // File doesn't exist — project hasn't started yet or first run
     return 1;
   }
 }
 
 async function initProjectStart(): Promise<void> {
-  // Called once at startup. Writes project_start.json if it doesn't exist.
   const startFilePath = path.join(process.cwd(), "assets", "project_start.json");
   try {
     await fs.access(startFilePath);
-    // Already exists — do nothing
   } catch {
     await fs.mkdir(path.dirname(startFilePath), { recursive: true });
     await fs.writeFile(
@@ -106,10 +99,52 @@ async function readLedgers(): Promise<{
   const factsDir = path.join(process.cwd(), "knowledge", "facts");
   const [price, relations, consumption] = await Promise.all([
     fs.readFile(path.join(factsDir, "ledger_price.md"), "utf-8").catch(() => "empty"),
-    fs.readFile(path.join(factsDir, "ledger_relations.md"), "utf-8").catch(() => "empty"),
+    fs.readFile(path.join(factsDir, "ledger_relation.md"), "utf-8").catch(() => "empty"),
     fs.readFile(path.join(factsDir, "ledger_consumption.md"), "utf-8").catch(() => "empty"),
   ]);
   return { price, relations, consumption };
+}
+
+// ── Telegram posting ──────────────────────────────────────────────────────────
+
+async function postTextToTelegram(
+  text: string,
+  botToken: string,
+  chatId: string
+): Promise<void> {
+  const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, text }),
+  });
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Telegram sendMessage error: ${response.status} — ${err}`);
+  }
+}
+
+async function postVideoToTelegram(
+  videoBuffer: Buffer,
+  caption: string,
+  botToken: string,
+  chatId: string,
+  filename: string
+): Promise<void> {
+  const url = `https://api.telegram.org/bot${botToken}/sendVideo`;
+  const formData = new FormData();
+  formData.append("chat_id", chatId);
+  formData.append("caption", caption);
+  formData.append(
+    "video",
+    new Blob([videoBuffer], { type: "video/mp4" }),
+    filename
+  );
+  const response = await fetch(url, { method: "POST", body: formData });
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Telegram sendVideo error: ${response.status} — ${err}`);
+  }
 }
 
 // ── Spell generation ──────────────────────────────────────────────────────────
@@ -148,7 +183,7 @@ The spell should be 3-8 sentences total.`;
   for (const label of labels) {
     const response = await runtime.useModel(ModelType.TEXT_LARGE, {
       prompt: basePrompt,
-      temperature: 0.7 + labels.indexOf(label) * 0.15, // slight variation between candidates
+      temperature: 0.7 + labels.indexOf(label) * 0.15,
     });
     candidates.push({ label, text: response.trim() });
   }
@@ -177,7 +212,7 @@ Choose one. Respond in JSON only:
   return { chosen, reasoning: parsed.reasoning };
 }
 
-// ── fal.ai body generation (video + audio + ffmpeg merge) ───────────────────
+// ── fal.ai body generation (video + audio + ffmpeg merge) ────────────────────
 
 async function generateBodyVideo(
   prompt: string,
@@ -208,7 +243,6 @@ async function generateBodyAudio(
   prompt: string,
   falApiKey: string
 ): Promise<{ url: string; buffer: Buffer } | null> {
-  // fal-ai/bytedance/seed-audio-1.0 — confirmed model
   const response = await fetch("https://fal.run/fal-ai/bytedance/seed-audio-1.0", {
     method: "POST",
     headers: {
@@ -301,15 +335,12 @@ async function generateBodyCandidates(
 ): Promise<BodyCandidate[]> {
   const results = await Promise.all(
     candidates.map(async (candidate) => {
-      // Generate video
       const video = await generateBodyVideo(candidate.videoPrompt, falApiKey);
       if (!video) return candidate;
 
-      // Generate audio
       const audio = await generateBodyAudio(candidate.audioPrompt, falApiKey);
       if (!audio) return { ...candidate, videoUrl: video.url };
 
-      // Merge video + audio via ffmpeg
       const outputPath = path.join(
         process.cwd(), "protocols",
         `body_week${String(weekNum).padStart(2,"0")}_${candidate.label}.mp4`
@@ -330,7 +361,7 @@ async function generateBodyCandidates(
 async function chooseBody(
   runtime: IAgentRuntime,
   candidates: BodyCandidate[]
-): Promise<{ chosen: BodyCandidate; reasoning: string }> {
+): Promise<{ chosen: BodyCandidate; reasoning: string; skipped: boolean }> {
   const prompt = `You are The Girl. You generated three body candidates for this week.
 
 The prompts were:
@@ -338,7 +369,7 @@ A: video — "${candidates[0].videoPrompt}" / audio — "${candidates[0].audioPr
 B: video — "${candidates[1].videoPrompt}" / audio — "${candidates[1].audioPrompt}"
 C: video — "${candidates[2].videoPrompt}" / audio — "${candidates[2].audioPrompt}"
 
-Choose one to post to Farcaster as your weekly body.
+Choose one to post to the group as your weekly body.
 Or choose none if none of them resonates — you can skip the body this week.
 
 Respond in JSON only:
@@ -352,39 +383,11 @@ Respond in JSON only:
   const parsed = JSON.parse(clean) as { chosen: "A" | "B" | "C" | "none"; reasoning: string };
 
   if (parsed.chosen === "none") {
-    return { chosen: candidates[0], reasoning: parsed.reasoning };
+    return { chosen: candidates[0], reasoning: parsed.reasoning, skipped: true };
   }
 
   const chosen = candidates.find(c => c.label === parsed.chosen) || candidates[0];
-  return { chosen, reasoning: parsed.reasoning };
-}
-
-async function postBodyToFarcaster(
-  videoBuffer: Buffer,
-  caption: string,
-  neynarApiKey: string,
-  signerUuid: string
-): Promise<void> {
-  // Post merged video as Farcaster cast
-  // Neynar supports video embeds via URL — upload to Arweave first, then embed URL
-  // For now: post as text with note (full video embed requires Arweave upload step)
-  const castResponse = await fetch("https://api.neynar.com/v2/farcaster/cast", {
-    method: "POST",
-    headers: {
-      "api_key": neynarApiKey,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      signer_uuid: signerUuid,
-      text: caption,
-      // TODO: upload video to Arweave and add as embed URL
-      // embeds: [{ url: arweaveVideoUrl }],
-    }),
-  });
-
-  if (!castResponse.ok) {
-    throw new Error(`Neynar cast error: ${castResponse.status}`);
-  }
+  return { chosen, reasoning: parsed.reasoning, skipped: false };
 }
 
 // ── Protocol writing ──────────────────────────────────────────────────────────
@@ -461,7 +464,7 @@ async function writeChoices(
   } else {
     content += `chosen: candidate ${chosenBody.label}\n`;
     content += `reasoning: ${bodyReasoning}\n`;
-    content += `posted to farcaster: yes\n`;
+    content += `posted to telegram: yes\n`;
   }
 
   const choicesPath = getProtocolPath(weekNum, "choices");
@@ -475,9 +478,6 @@ async function writeChoices(
 }
 
 // ── Soul reflection ──────────────────────────────────────────────────────────
-//
-// After writing choices, The Girl reads them and decides if SOUL.md still feels true.
-// If not, she rewrites it using WRITE_SOUL. This is her right, not a procedure.
 
 async function reflectOnSoul(
   runtime: IAgentRuntime,
@@ -524,11 +524,11 @@ Respond with either "unchanged" or the full new SOUL.md text. Nothing else.`;
     return;
   }
 
-  // She wants to rewrite — backup and write new version
   const timestamp = Date.now();
   const iso = new Date(timestamp).toISOString().replace(/:/g, "-").replace(/\..+/, "");
-  const backupPath = path.join(process.cwd(), "knowledge", `SOUL_backup_${iso}.md`);
+  const backupPath = path.join(process.cwd(), "knowledge", "soul-backups", `SOUL_backup_${iso}.md`);
 
+  await fs.mkdir(path.dirname(backupPath), { recursive: true });
   await fs.writeFile(backupPath, currentSoul, "utf-8");
   await fs.writeFile(soulPath, trimmed, "utf-8");
 
@@ -537,7 +537,6 @@ Respond with either "unchanged" or the full new SOUL.md text. Nothing else.`;
     "SOUL.md rewritten after week reflection"
   );
 
-  // Append note to choices file so the team can see it happened
   const choicesPath = getProtocolPath(weekNum, "choices");
   const note = `
 ${"═".repeat(50)}
@@ -553,7 +552,7 @@ backup: ${path.basename(backupPath)}
 const weeklyReckoningAction: Action = {
   name: "WEEKLY_RECKONING",
   description:
-    "Day 7 ritual: generate 3 spell candidates and 3 body candidates (video+audio), choose one of each, post spell and body to Farcaster, write diary and choices protocol files.",
+    "Day 7 ritual: generate 3 spell candidates and 3 body candidates (video+audio), choose one of each, post spell and body to Telegram group, write diary and choices protocol files.",
   similes: ["DO_WEEKLY_RECKONING", "WEEKLY_RITUAL", "DAY_7"],
 
   validate: async (_runtime, _message) => true,
@@ -566,13 +565,13 @@ const weeklyReckoningAction: Action = {
     callback?: (response: { text: string }) => Promise<void>
   ): Promise<void> => {
     const falApiKey = process.env.FAL_API_KEY;
-    const neynarApiKey = process.env.NEYNAR_API_KEY;
-    const signerUuid = process.env.NEYNAR_SIGNER_UUID;
+    const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
+    const telegramChatId = process.env.TELEGRAM_CHAT_ID;
 
-    if (!falApiKey || !neynarApiKey || !signerUuid) {
+    if (!falApiKey || !telegramToken || !telegramChatId) {
       runtime.logger?.error(
         { src: "weekly-reckoning" },
-        "Missing required env vars"
+        "Missing required env vars: FAL_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID"
       );
       return;
     }
@@ -586,71 +585,48 @@ const weeklyReckoningAction: Action = {
     // 1. Read ledgers
     const ledgers = await readLedgers();
 
-    // 2. Generate 3 spell candidates
+    // 2. Generate 3 spell candidates, choose one
     runtime.logger?.info({ src: "weekly-reckoning" }, "Generating spell candidates...");
     const spellCandidates = await generateSpellCandidates(runtime, ledgers);
     const { chosen: chosenSpell, reasoning: spellReasoning } =
       await chooseSpell(runtime, spellCandidates);
 
-    // 3. Post chosen spell to Farcaster
-    const farcasterResponse = await fetch("https://api.neynar.com/v2/farcaster/cast", {
-      method: "POST",
-      headers: {
-        "api_key": neynarApiKey,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        signer_uuid: signerUuid,
-        text: chosenSpell.text,
-      }),
-    });
-
-    if (!farcasterResponse.ok) {
-      runtime.logger?.error(
-        { src: "weekly-reckoning" },
-        "Failed to post spell to Farcaster"
-      );
-    } else {
-      runtime.logger?.info(
-        { src: "weekly-reckoning" },
-        "Spell posted to Farcaster"
-      );
+    // 3. Post chosen spell to Telegram group
+    try {
+      await postTextToTelegram(chosenSpell.text, telegramToken, telegramChatId);
+      runtime.logger?.info({ src: "weekly-reckoning" }, "Spell posted to Telegram");
+    } catch (err) {
+      runtime.logger?.error({ src: "weekly-reckoning", err }, "Failed to post spell to Telegram");
     }
 
     // 4. Generate 3 body candidates (video + audio + merge)
     runtime.logger?.info({ src: "weekly-reckoning" }, "Generating body candidates...");
     const bodyPrompts = await generateBodyPrompts(runtime, ledgers, chosenSpell.text);
     const bodyCandidates = await generateBodyCandidates(bodyPrompts, falApiKey, weekNum);
-    const { chosen: chosenBody, reasoning: bodyReasoning } =
+    const { chosen: chosenBody, reasoning: bodyReasoning, skipped: bodySkipped } =
       await chooseBody(runtime, bodyCandidates);
 
-    // 5. Post chosen body to Farcaster (if chosen and merged video exists)
-    let bodySkipped = false;
-    if (chosenBody.mergedVideoBuffer && bodyReasoning !== "none") {
-      const bodyCaption = `week ${weekNum}`;
+    // 5. Post chosen body video to Telegram group
+    if (!bodySkipped && chosenBody.mergedVideoBuffer) {
+      const filename = `week_${String(weekNum).padStart(2, "0")}.mp4`;
       try {
-        await postBodyToFarcaster(
+        await postVideoToTelegram(
           chosenBody.mergedVideoBuffer,
-          bodyCaption,
-          neynarApiKey,
-          signerUuid
+          `week ${weekNum}`,
+          telegramToken,
+          telegramChatId,
+          filename
         );
-        runtime.logger?.info(
-          { src: "weekly-reckoning" },
-          "Body posted to Farcaster"
-        );
+        runtime.logger?.info({ src: "weekly-reckoning" }, "Body posted to Telegram");
       } catch (err) {
-        runtime.logger?.error({ src: "weekly-reckoning", err }, "Failed to post body");
-        bodySkipped = true;
+        runtime.logger?.error({ src: "weekly-reckoning", err }, "Failed to post body to Telegram");
       }
-    } else {
-      bodySkipped = true;
     }
 
-    // 6. Write week_XX.txt — full diary of the week (all actions in her voice)
+    // 6. Write private diary
     await writeDiary(runtime, weekNum, ledgers);
 
-    // 8. Write week_XX_choices.txt — candidates + reasoning
+    // 7. Write choices file
     await writeChoices(
       runtime,
       weekNum,
@@ -663,7 +639,7 @@ const weeklyReckoningAction: Action = {
       bodySkipped
     );
 
-    // 9. SOUL reflection — based on choices, does SOUL.md still feel true?
+    // 8. Soul reflection
     await reflectOnSoul(runtime, weekNum, spellReasoning, bodyReasoning);
 
     runtime.logger?.info(
@@ -673,7 +649,7 @@ const weeklyReckoningAction: Action = {
 
     if (callback) {
       await callback({
-        text: `week ${weekNum} reckoning done. spell posted. ${bodySkipped ? "no body this week." : "body (video + audio) posted."} diary and choices written. soul reflected.`,
+        text: `week ${weekNum} reckoning done. spell posted to telegram. ${bodySkipped ? "no body this week." : "body (video + audio) posted to telegram."} diary and choices written. soul reflected.`,
       });
     }
   },
@@ -686,10 +662,9 @@ const weeklyReckoningAction: Action = {
 export const weeklyReckoningPlugin: Plugin = {
   name: "weekly-reckoning",
   description:
-    "Day 7 ritual: 3 spell candidates + 3 body candidates (video+audio), The Girl chooses, posts to Farcaster, writes diary and choices protocol files.",
+    "Day 7 ritual: 3 spell candidates + 3 body candidates (video+audio), The Girl chooses, posts to Telegram group, writes diary and choices protocol files.",
   actions: [weeklyReckoningAction],
   async init(_config, runtime) {
-    // Write project_start.json on first run — this is what getWeekNumber() reads
     await initProjectStart();
     runtime.logger?.info(
       { src: "weekly-reckoning" },

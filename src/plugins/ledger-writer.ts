@@ -189,7 +189,7 @@ const writeLedgerEntryAction: Action = {
       const data = extracted[ledgerType];
       if (!data || Object.values(data).every((v) => v === null)) continue;
       const memory: Memory = {
-        id: `${sessionId}_ledger_${ledgerType}` as any,
+        id: crypto.randomUUID() as any,
         agentId: runtime.agentId,
         userId: runtime.agentId,
         roomId: message.roomId,
@@ -231,7 +231,7 @@ const ledgerWriterEvaluator = {
       const data = extracted[ledgerType];
       if (!data || Object.values(data).every((v) => v === null)) continue;
       const memory: Memory = {
-        id: `${sessionId}_ledger_${ledgerType}_${timestamp}` as any,
+        id: crypto.randomUUID() as any,
         agentId: runtime.agentId,
         userId: runtime.agentId,
         roomId: message.roomId,
