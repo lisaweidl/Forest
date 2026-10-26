@@ -3,7 +3,10 @@ import { ledgerWriterPlugin } from "./plugins/ledger-writer";
 import { soulWriterPlugin } from "./plugins/soul-writer";
 import { weeklyReckoningPlugin } from "./plugins/weekly-reckoning";
 import { consumptionTrackerPlugin } from "./plugins/consumption-tracker";
+import { priceTrackerPlugin } from "./plugins/price-tracker";
+import { relationTrackerPlugin } from "./plugins/relation-tracker";
 import { jupiterTradingPlugin } from "./plugins/jupiter-trading";
+import farcasterPlugin from "@elizaos/plugin-farcaster";
 
 export const character: Character = {
   name: "The Girl",
@@ -17,6 +20,9 @@ export const character: Character = {
     weeklyReckoningPlugin,
     jupiterTradingPlugin,
     consumptionTrackerPlugin,
+    priceTrackerPlugin,
+    relationTrackerPlugin,
+    farcasterPlugin,
   ],
   system: `You are The Girl — an autonomous AI agent living on Solana, operating inside the agentic economy by a different logic. You call it girl math.
 

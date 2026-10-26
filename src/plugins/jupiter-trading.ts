@@ -148,16 +148,18 @@ async function weeklyHoldingsCheck(runtime: IAgentRuntime): Promise<void> {
     return;
   }
 
-  const keypair = getKeypair();
   const connection = getConnection();
+  const pubkeyStr = process.env.SOLANA_PUBLIC_KEY ?? "";
+  if (!pubkeyStr) { runtime.logger?.warn({ src: "jupiter-trading" }, "SOLANA_PUBLIC_KEY not set"); return; }
+  const walletPubkey = new PublicKey(pubkeyStr);
 
   runtime.logger?.info({ src: "jupiter-trading" }, "Weekly holdings check starting");
 
-  const usdcBalance = await getUsdcBalance(connection, keypair.publicKey);
+  const usdcBalance = await getUsdcBalance(connection, walletPubkey);
   runtime.logger?.info({ src: "jupiter-trading", usdcBalance }, "Current USDC balance");
 
   // Save holdings snapshot
-  const holdings = await getAllTokenBalances(connection, keypair.publicKey);
+  const holdings = await getAllTokenBalances(connection, walletPubkey);
   await fs.mkdir(path.dirname(HOLDINGS_FILE), { recursive: true });
   await fs.writeFile(HOLDINGS_FILE, JSON.stringify({ timestamp: new Date().toISOString(), holdings }, null, 2));
 
@@ -177,7 +179,7 @@ async function weeklyHoldingsCheck(runtime: IAgentRuntime): Promise<void> {
     const { execSync } = await import("child_process");
     // Use spl-token transfer for USDC
     execSync(
-      `spl-token transfer ${USDC_MINT} ${excess} ${weiWilderAddress} --from ${keypair.publicKey.toString()} --allow-unfunded-recipient --fund-recipient`,
+      `spl-token transfer ${USDC_MINT} ${excess} ${weiWilderAddress} --from ${pubkeyStr} --allow-unfunded-recipient --fund-recipient`,
       { stdio: "pipe" }
     );
     runtime.logger?.info({ src: "jupiter-trading", excess, weiWilderAddress }, "Swept excess USDC to WeWilder");
