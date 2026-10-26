@@ -22,7 +22,7 @@ const priceState = {
 async function getSolPrice(): Promise<number> {
   try {
     const { default: fetch } = await import("node-fetch");
-    const res = await (fetch as any)("https://price.jup.ag/v6/price?ids=SOL&vsToken=USDC", { signal: AbortSignal.timeout(8000) });
+    const res = await (fetch as any)("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd", { signal: AbortSignal.timeout(8000) });
     const json = await (res as any).json() as any;
     return parseFloat(json?.data?.SOL?.price ?? "0") || 0;
   } catch { return 0; }
