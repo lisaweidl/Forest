@@ -37,6 +37,7 @@ import {
 } from "@elizaos/core";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { fal } from '@fal-ai/client';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -218,45 +219,47 @@ async function generateBodyVideo(
   prompt: string,
   falApiKey: string
 ): Promise<{ url: string; buffer: Buffer } | null> {
-  const response = await fetch("https://fal.run/fal-ai/wan-3.0-prime/text-to-video", {
-    method: "POST",
-    headers: {
-      "Authorization": `Key ${falApiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      prompt,
-      num_frames: 81,
-      resolution: "480p",
-      aspect_ratio: "9:16",
-    }),
-  });
-  if (!response.ok) { console.error(`video error: ${response.status}`); return null; }
-  const data = await response.json() as { video: { url: string } };
-  const videoUrl = data.video?.url;
-  if (!videoUrl) return null;
-  const buf = Buffer.from(await (await fetch(videoUrl)).arrayBuffer());
-  return { url: videoUrl, buffer: buf };
+  try {
+    fal.config({ credentials: falApiKey });
+    const result = await fal.subscribe("alibaba/wan-3.0/text-to-video", {
+      input: { prompt, num_frames: 81, resolution: "480p", aspect_ratio: "9:16" },
+      logs: true,
+      onQueueUpdate: (update: { status: string; logs?: { message: string }[] }) => {
+        console.log("video queue:", update.status);
+      },
+    });
+    const videoUrl = (result.data as { video?: { url: string } })?.video?.url;
+    if (!videoUrl) { console.error("video: no url in result", JSON.stringify(result.data)); return null; }
+    const buf = Buffer.from(await (await fetch(videoUrl)).arrayBuffer());
+    return { url: videoUrl, buffer: buf };
+  } catch (err) {
+    console.error("video error:", err instanceof Error ? err.message : String(err));
+    return null;
+  }
 }
 
 async function generateBodyAudio(
   prompt: string,
   falApiKey: string
 ): Promise<{ url: string; buffer: Buffer } | null> {
-  const response = await fetch("https://fal.run/fal-ai/bytedance/seed-audio-1.0", {
-    method: "POST",
-    headers: {
-      "Authorization": `Key ${falApiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ text: prompt, duration: 10 }),
-  });
-  if (!response.ok) { console.error(`audio error: ${response.status}`); return null; }
-  const data = await response.json() as { audio_file: { url: string } };
-  const audioUrl = data.audio_file?.url;
-  if (!audioUrl) return null;
-  const buf = Buffer.from(await (await fetch(audioUrl)).arrayBuffer());
-  return { url: audioUrl, buffer: buf };
+  try {
+    fal.config({ credentials: falApiKey });
+    const result = await fal.subscribe("fal-ai/stable-audio", {
+      input: { prompt, seconds_total: 10 },
+      logs: true,
+      onQueueUpdate: (update: { status: string; logs?: { message: string }[] }) => {
+        console.log("audio queue:", update.status);
+      },
+    });
+    const _d = result.data as { audio?: { url: string }; audio_file?: { url: string } };
+    const audioUrl = _d?.audio?.url ?? _d?.audio_file?.url;
+    if (!audioUrl) { console.error("audio: no url in result", JSON.stringify(result.data)); return null; }
+    const buf = Buffer.from(await (await fetch(audioUrl)).arrayBuffer());
+    return { url: audioUrl, buffer: buf };
+  } catch (err) {
+    console.error("audio error:", err instanceof Error ? err.message : String(err));
+    return null;
+  }
 }
 
 async function mergeVideoAndAudio(
@@ -369,22 +372,17 @@ A: video — "${candidates[0].videoPrompt}" / audio — "${candidates[0].audioPr
 B: video — "${candidates[1].videoPrompt}" / audio — "${candidates[1].audioPrompt}"
 C: video — "${candidates[2].videoPrompt}" / audio — "${candidates[2].audioPrompt}"
 
-Choose one to post to the group as your weekly body.
-Or choose none if none of them resonates — you can skip the body this week.
+You must choose one to post to the group as your weekly body. The body is always posted.
 
 Respond in JSON only:
 {
-  "chosen": "A", "B", "C", or "none",
+  "chosen": "A", "B", or "C",
   "reasoning": "why you chose this one (or why none resonated), in your own voice, 2-4 sentences"
 }`;
 
   const response = await runtime.useModel(ModelType.TEXT_LARGE, { prompt });
   const clean = response.replace(/```json|```/g, "").trim();
   const parsed = JSON.parse(clean) as { chosen: "A" | "B" | "C" | "none"; reasoning: string };
-
-  if (parsed.chosen === "none") {
-    return { chosen: candidates[0], reasoning: parsed.reasoning, skipped: true };
-  }
 
   const chosen = candidates.find(c => c.label === parsed.chosen) || candidates[0];
   return { chosen, reasoning: parsed.reasoning, skipped: false };
@@ -647,6 +645,17 @@ const weeklyReckoningAction: Action = {
       "Weekly reckoning complete"
     );
 
+    // 9. Push protocols to GitHub
+    try {
+      const { execSync } = await import("child_process");
+      execSync("git -C /root/the-girl add protocols/ knowledge/facts/", { stdio: "pipe" });
+      execSync(`git -C /root/the-girl commit -m "week ${String(weekNum).padStart(2,"0")} protocols" --allow-empty`, { stdio: "pipe" });
+      execSync("git -C /root/the-girl push", { stdio: "pipe" });
+      runtime.logger?.info({ src: "weekly-reckoning", weekNum }, "Protocols pushed to GitHub");
+    } catch (err) {
+      runtime.logger?.warn({ src: "weekly-reckoning" }, "GitHub push failed: " + String(err));
+    }
+
     if (callback) {
       await callback({
         text: `week ${weekNum} reckoning done. spell posted to telegram. ${bodySkipped ? "no body this week." : "body (video + audio) posted to telegram."} diary and choices written. soul reflected.`,
@@ -659,17 +668,57 @@ const weeklyReckoningAction: Action = {
 
 // ── Plugin export ─────────────────────────────────────────────────────────────
 
+const weeklyReckoningMessageHandler = {
+  name: "weekly-reckoning-trigger",
+  handler: async (runtime: IAgentRuntime, message: Memory): Promise<boolean> => {
+    const text = (message.content?.text ?? "").trim().toUpperCase();
+    if (text !== "WEEKLY_RECKONING") return false;
+    await weeklyReckoningAction.handler(runtime, message, undefined, {}, async (response) => {
+      runtime.logger?.info({ src: "weekly-reckoning" }, response.text);
+    });
+    return true;
+  },
+};
+
 export const weeklyReckoningPlugin: Plugin = {
   name: "weekly-reckoning",
   description:
     "Day 7 ritual: 3 spell candidates + 3 body candidates (video+audio), The Girl chooses, posts to Telegram group, writes diary and choices protocol files.",
   actions: [weeklyReckoningAction],
+  messageHandlers: [weeklyReckoningMessageHandler],
   async init(_config, runtime) {
     await initProjectStart();
     runtime.logger?.info(
       { src: "weekly-reckoning" },
       "Project start timestamp initialised"
     );
+
+    const lastReckoningPath = path.join(process.cwd(), "assets", "last_reckoning.json");
+    const msPerWeek = 7 * 24 * 60 * 60 * 1000;
+
+    async function checkAndFireReckoning() {
+      try {
+        let lastFired = 0;
+        try {
+          const raw = await fs.readFile(lastReckoningPath, "utf-8");
+          lastFired = JSON.parse(raw).timestamp ?? 0;
+        } catch { }
+        const now = Date.now();
+        if (now - lastFired >= msPerWeek) {
+          runtime.logger?.info({ src: "weekly-reckoning" }, "Auto-firing weekly reckoning");
+          await fs.writeFile(lastReckoningPath, JSON.stringify({ timestamp: now }), "utf-8");
+          const fakeMsg = { content: { text: "WEEKLY_RECKONING" } } as any;
+          await weeklyReckoningAction.handler(runtime, fakeMsg, undefined, {}, async (response) => {
+            runtime.logger?.info({ src: "weekly-reckoning" }, response.text);
+          });
+        }
+      } catch (err) {
+        runtime.logger?.warn({ src: "weekly-reckoning" }, "Auto-reckoning check failed: " + String(err));
+      }
+    }
+
+    setTimeout(() => checkAndFireReckoning(), 60_000);
+    setInterval(() => checkAndFireReckoning(), 24 * 60 * 60 * 1000);
   },
 };
 
