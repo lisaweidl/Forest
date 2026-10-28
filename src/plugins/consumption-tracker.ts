@@ -25,6 +25,7 @@ import {
   type State,
 } from "@elizaos/core";
 import * as fs from "node:fs/promises";
+import * as fsSync from "node:fs";
 import * as path from "node:path";
 
 const VM_WATTS = 8;
@@ -188,10 +189,31 @@ const consumptionEvaluator = {
   examples: [],
 };
 
+// --- Ledger Provider ---
+export const ledgerProvider = {
+  name: "LEDGER_STATE",
+  dynamic: false,
+  description: "Current state of all three ledgers",
+  get: async (_runtime: IAgentRuntime, _message: Memory): Promise<string> => {
+    const base = "/root/the-girl/knowledge/facts";
+    const read = (file: string): string => {
+      try {
+        const lines = fsSync.readFileSync(`${base}/${file}`, "utf8")
+          .split("\n")
+          .filter(l => l.startsWith("| 2"))
+          .slice(-1)[0] ?? "no data yet";
+        return lines;
+      } catch { return "not available"; }
+    };
+    return { text: `CURRENT LEDGER STATE (last entry each):\n\nPRICE: ${read("ledger_price.md")}\nCONSUMPTION: ${read("ledger_consumption.md")}\nRELATION: ${read("ledger_relation.md")}` };
+  }
+};
+
 export const consumptionTrackerPlugin: Plugin = {
   name: "consumption-tracker",
   description: "Autonomously tracks VM energy, water, transaction, and API cost consumption. Writes ledger_consumption.md every 30 minutes.",
   evaluators: [consumptionEvaluator],
+  providers: [ledgerProvider],
 };
 
 export default consumptionTrackerPlugin;
