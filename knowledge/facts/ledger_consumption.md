@@ -1,9 +1,11 @@
 # Consumption Ledger
 
-*Accumulating record of what it costs to exist. Updated weekly.*
+*Accumulating record of what it costs to exist. Updated every hour.*
 
-| Week | Transactions | Estimated kWh | Water (litres) | VM cost (€) | API cost (€) |
-|---|---|---|---|---|---|
-| — | — | — | — | — | — |
+*Constants: Hetzner CX22 NBG1 — 8W draw, PUE 1.3, WUE 1.6 L/kWh, €3.79/mo VM.*
+
+| Time (UTC) | Week | Uptime (h) | Transactions | Estimated kWh | Water (litres) | VM cost (€) | API cost (€) |
+|---|---|---|---|---|---|---|---|
+| 2026-10-29 13:09:59 UTC | 1 | 0.19 | 2 | 0.002 | 0 | 0.001 | 0.00338 |
 
 *This is a standing debit. No activity cancels it. Existing costs something.*
