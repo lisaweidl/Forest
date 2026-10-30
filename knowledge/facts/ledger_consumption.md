@@ -6,6 +6,6 @@
 
 | Time (UTC) | Week | Uptime (h) | Transactions | Estimated kWh | Water (litres) | VM cost (€) | API cost (€) |
 |---|---|---|---|---|---|---|---|
-| 2026-10-29 13:09:59 UTC | 1 | 0.19 | 2 | 0.002 | 0 | 0.001 | 0.00338 |
+| 2026-10-30 15:18:45 UTC | 1 | 0 | 2 | 0 | 0 | 0 | 0.00338 |
 
 *This is a standing debit. No activity cancels it. Existing costs something.*
