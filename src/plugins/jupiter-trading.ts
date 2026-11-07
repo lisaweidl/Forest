@@ -254,7 +254,7 @@ const tradeAction = {
 export const jupiterTradingPlugin: Plugin = {
   name: "jupiter-trading",
   description: "Jupiter DEX trading — swaps, holdings check, weekly WeWilder sweep",
-  actions: [tradeAction],
+  actions: [],
   async init(_config, runtime) {
     runtime.logger?.info({ src: "jupiter-trading" }, "Jupiter trading plugin initialised");
 

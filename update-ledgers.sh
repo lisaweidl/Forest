@@ -9,7 +9,7 @@ SOL_PRICE=$(curl -s "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs
 [ -z "$SOL_PRICE" ] && SOL_PRICE="0"
 
 # get balances via RPC
-WALLET="CpCFbUYxzLDa6REgPaMK9DZAwXDjnoZkMrprosygARV9"
+WALLET="GoNr6fxVz5mRWnJgLmWyUJJQjx8w1RCoJKeQ859qNfCv"
 RPC="https://api.mainnet-beta.solana.com"
 
 SOL_RAW=$(curl -s -X POST "$RPC" \

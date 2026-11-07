@@ -205,7 +205,7 @@ export const ledgerProvider = {
         return lines;
       } catch { return "not available"; }
     };
-    return { text: `CURRENT LEDGER STATE (last entry each):\n\nPRICE: ${read("ledger_price.md")}\nCONSUMPTION: ${read("ledger_consumption.md")}\nRELATION: ${read("ledger_relation.md")}` };
+    return { text: `CURRENT LEDGER STATE (last entry each):\n\nPRICE LEDGER (columns: Time | Week | Inflow_USDC | Balance_USDC | Outflow_USDC | SOL_balance | Notes):\n${read("ledger_price.md")}\n\nCONSUMPTION LEDGER (columns: Time | Week | Uptime_h | Transactions | kWh | Water_L | VM_cost_EUR | API_cost_EUR):\n${read("ledger_consumption.md")}\n\nRELATION LEDGER (columns: Time | Week | Uptime_h | Refusals | Gifts_sent | Responses_received | Agents_engaged | Notes):\n${read("ledger_relation.md")}` };
   }
 };
 
