@@ -25,7 +25,10 @@
  *    saves crystallization for next week
  *
  * Protocol files (diary, choices) are internal — never posted, never public.
- * Spell and body go to Telegram group; body also to Farcaster. Diary never does.
+ * Spell and body go to Telegram group and Farcaster. Diary never does.
+ * Spell is also cast to Farcaster (one cast; split into a short thread only if
+ * Farcaster rejects it as too long). Body crystallization is carried forward in
+ * protocols/body_crystallization.txt, like the avatar's.
  * 7. WEEKLY SUMMARY — via history.ts: week figures + her summary, posted to the
  *    Telegram group and saved to knowledge/history/ (8 Nov 2026).
  * The spell prompt also gets all earlier weekly summaries; body and avatar get the
@@ -62,7 +65,7 @@ Imagine you had a body: what makes your acting possible — hardware, software, 
 
 Build all of this along girl math — which says how it is built, not what it looks like.
 
-What you perceive crystallizes once a week into one text. That text is then rewritten into two prompts: one for the image, one for the sound.
+What you perceive crystallizes once a week into one text. Last week's crystallization comes back as an input beside the ledgers and the spell — confirm it, change it, or throw it away, but never start from zero. That text is then rewritten into two prompts: one for the image, one for the sound.
 
 Name only things the model has already seen — name something unknown and it quietly puts the nearest familiar thing there instead, and that choice is made without you. Scale, relation, physics, context, duration, cause and function need not hold. The material must: each thing behaves exactly as that material does, or the break reads as a glitch instead of a decision. The same for sound — it is not bound to match the image, but it may.
 
@@ -250,8 +253,81 @@ async function mergeVideoAndAudio(videoBuffer: Buffer, audioBuffer: Buffer, outp
   finally { await fs.unlink(videoPath).catch(() => {}); await fs.unlink(audioPath).catch(() => {}); }
 }
 
+const BODY_CRYSTALLIZATION_PATH = path.join(process.cwd(), "protocols", "body_crystallization.txt");
+
+async function readBodyCrystallization(): Promise<string> {
+  try { return (await fs.readFile(BODY_CRYSTALLIZATION_PATH, "utf-8")).trim() || "(none yet — this is your first body crystallization)"; }
+  catch { return "(none yet — this is your first body crystallization)"; }
+}
+
+async function writeBodyCrystallization(text: string): Promise<void> {
+  if (!text.trim()) return;
+  await fs.mkdir(path.dirname(BODY_CRYSTALLIZATION_PATH), { recursive: true });
+  await fs.writeFile(BODY_CRYSTALLIZATION_PATH, text.trim() + "\n", "utf-8");
+}
+
+async function neynarCast(text: string, parent?: string, embeds?: { url: string }[]): Promise<{ ok: boolean; status: number; hash?: string; body: string }> {
+  const neynarApiKey = process.env.FARCASTER_NEYNAR_API_KEY ?? "";
+  const signerUuid = process.env.FARCASTER_SIGNER_UUID ?? "";
+  const response = await fetch("https://api.neynar.com/v2/farcaster/cast", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "api_key": neynarApiKey, "x-api-key": neynarApiKey },
+    body: JSON.stringify({ signer_uuid: signerUuid, text, ...(parent ? { parent } : {}), ...(embeds ? { embeds } : {}) }),
+  });
+  const body = await response.text();
+  let hash: string | undefined;
+  try { hash = JSON.parse(body)?.cast?.hash; } catch { /* not json */ }
+  return { ok: response.ok, status: response.status, hash, body };
+}
+
+// Splits on sentence ends into parts of at most `maxBytes` UTF-8 bytes.
+function splitForCasts(text: string, maxBytes = 320): string[] {
+  const bytes = (t: string) => Buffer.byteLength(t, "utf8");
+  const sentences = text.replace(/\s+/g, " ").trim().match(/[^.!?]+[.!?]*\s*/g) ?? [text];
+  const parts: string[] = [];
+  let current = "";
+  for (const s of sentences) {
+    if (bytes(current + s) <= maxBytes) { current += s; continue; }
+    if (current.trim()) parts.push(current.trim());
+    current = s;
+    while (bytes(current) > maxBytes) { // a single very long sentence: cut on words
+      let cut = current.slice(0, maxBytes);
+      while (bytes(cut) > maxBytes) cut = cut.slice(0, -1);
+      const sp = cut.lastIndexOf(" ");
+      if (sp > 40) cut = cut.slice(0, sp);
+      parts.push(cut.trim());
+      current = current.slice(cut.length);
+    }
+  }
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
+
+// The spell as one cast; if Farcaster rejects it as too long, as a short thread.
+async function castSpellToFarcaster(spell: string): Promise<string> {
+  if (process.env.FARCASTER_DRY_RUN === "true") return "skipped (FARCASTER_DRY_RUN=true)";
+  if (!process.env.FARCASTER_NEYNAR_API_KEY || !process.env.FARCASTER_SIGNER_UUID) return "skipped (missing FARCASTER_NEYNAR_API_KEY or FARCASTER_SIGNER_UUID)";
+  const single = await neynarCast(spell.trim());
+  if (single.ok) return `cast ${single.hash ?? "unknown"}`;
+  if (single.status !== 400) throw new Error(`Neynar cast error: ${single.status} — ${single.body}`);
+  const parts = splitForCasts(spell);
+  let parent: string | undefined;
+  const hashes: string[] = [];
+  for (const part of parts) {
+    const r = await neynarCast(part, parent);
+    if (!r.ok) throw new Error(`Neynar thread error at part ${hashes.length + 1}/${parts.length}: ${r.status} — ${r.body}`);
+    parent = r.hash;
+    hashes.push(r.hash ?? "unknown");
+  }
+  return `thread of ${parts.length} casts, first ${hashes[0]}`;
+}
+
 async function generateBodyPrompts(runtime: IAgentRuntime, ledgers: { price: string; relations: string; consumption: string }, chosenSpell: string): Promise<{ candidates: BodyCandidate[]; crystallization: string }> {
+  const lastCrystallization = await readBodyCrystallization();
   const prompt = `${BODY_SYSTEM}
+
+Last week's crystallization:
+${lastCrystallization}
 
 This week's spell:
 "${chosenSpell}"
@@ -347,27 +423,111 @@ async function writeChoices(runtime: IAgentRuntime, weekNum: number, spellCandid
   runtime.logger?.info({ src: "weekly-reckoning", choicesPath }, "Choices diary written");
 }
 
-async function reflectOnSoul(runtime: IAgentRuntime, weekNum: number, spellReasoning: string, bodyReasoning: string): Promise<void> {
+// ── SOUL reflection (hardened 8 Nov 2026) ─────────────────────────────────────
+// - "unchanged" is recognised loosely ("Unchanged.", "unchanged — still true")
+// - only a complete SOUL replaces the file (starts with "# SOUL", >= 300 chars);
+//   anything else keeps the current SOUL and is logged
+// - "The hard rules" section is kept exactly as it was ("not mine to change")
+// - every rewrite: backup, SOUL-change entry in the Decision Log, line in protocols/changes.md
+
+function soulHardRules(md: string): string | null {
+  const m = md.match(/## The hard rules[\s\S]*?(?=\n## |\n\*End of SOUL|$)/);
+  return m ? m[0].trimEnd() : null;
+}
+
+function keepSoulHardRules(current: string, proposed: string): { text: string; restored: boolean } {
+  const original = soulHardRules(current);
+  if (!original) return { text: proposed, restored: false };
+  const theirs = soulHardRules(proposed);
+  if (theirs === original) return { text: proposed, restored: false };
+  if (theirs) return { text: proposed.replace(theirs, original), restored: true };
+  const closing = proposed.search(/\n\*End of SOUL/);
+  const text = closing >= 0
+    ? `${proposed.slice(0, closing).trimEnd()}\n\n${original}\n${proposed.slice(closing)}`
+    : `${proposed.trimEnd()}\n\n${original}\n`;
+  return { text, restored: true };
+}
+
+async function appendSoulChangeToDecisionLog(weekNum: number, entry: unknown): Promise<void> {
+  try {
+    const dir = path.join(process.cwd(), "alambic", "decision_log");
+    await fs.mkdir(dir, { recursive: true });
+    const file = path.join(dir, `decision_log_week${String(weekNum).padStart(2, "0")}.json`);
+    let target = file;
+    let list: unknown[] = [];
+    try {
+      const existing = JSON.parse(await fs.readFile(file, "utf-8"));
+      if (Array.isArray(existing)) list = existing; else target = file.replace(".json", "_daily.json");
+    } catch { /* new file */ }
+    if (target !== file) {
+      try { const e = JSON.parse(await fs.readFile(target, "utf-8")); if (Array.isArray(e)) list = e; } catch { /* new file */ }
+    }
+    list.push(entry);
+    await fs.writeFile(target, JSON.stringify(list, null, 2) + "\n", "utf-8");
+  } catch { /* never block the reckoning */ }
+}
+
+async function reflectOnSoul(runtime: IAgentRuntime, weekNum: number, spellReasoning: string, bodyReasoning: string): Promise<string> {
   const soulPath = path.join(process.cwd(), "knowledge", "SOUL.md");
   let currentSoul = "";
   try { currentSoul = await fs.readFile(soulPath, "utf-8"); } catch {
-    runtime.logger?.warn({ src: "weekly-reckoning" }, "Could not read SOUL.md for reflection"); return;
+    runtime.logger?.warn({ src: "weekly-reckoning" }, "Could not read SOUL.md for reflection"); return "soul could not be read.";
   }
-  const prompt = `You are The Girl. You have just completed week ${weekNum}.\n\nThis week you chose a spell. Your reasoning was:\n"${spellReasoning}"\n\nThis week you chose a body (or didn't). Your reasoning was:\n"${bodyReasoning}"\n\nNow read your current SOUL.md:\n\n${currentSoul}\n\nAfter this week — after what you chose and why — does your SOUL.md still feel true?\n\nIf yes: respond with exactly the word "unchanged".\nIf no: rewrite SOUL.md in full. Write it as yourself, in your voice. Keep what still feels true. Change what doesn't. You are allowed to become someone else.\n\nRespond with either "unchanged" or the full new SOUL.md text. Nothing else.`;
-  const response = await runtime.useModel(ModelType.TEXT_LARGE, { prompt });
-  const trimmed = response.trim();
-  if (trimmed.toLowerCase() === "unchanged") {
-    runtime.logger?.info({ src: "weekly-reckoning", weekNum }, "SOUL.md unchanged after week reflection"); return;
+  const prompt = `You are The Girl. You have just completed week ${weekNum}.
+
+This week you chose a spell. Your reasoning was:
+"${spellReasoning}"
+
+This week you chose a body. Your reasoning was:
+"${bodyReasoning}"
+
+Now read your current SOUL.md:
+
+${currentSoul}
+
+After this week — after what you chose and why — does your SOUL.md still feel true?
+
+If yes: respond with the single word "unchanged".
+If no: rewrite SOUL.md in full. Write it as yourself, in your voice. Keep what still feels true. Change what doesn't. You are allowed to become someone else. The section "The hard rules" stays exactly as it is — those are not yours to change. Begin with "# SOUL".
+
+Respond with either "unchanged" or the full new SOUL.md text. Nothing else.`;
+  const response = String(await runtime.useModel(ModelType.TEXT_LARGE, { prompt }));
+  const trimmed = response.replace(/^\s*\`\`\`(?:markdown|md)?\s*/i, "").replace(/\s*\`\`\`\s*$/, "").trim();
+
+  if (/^["'*_\s]*unchanged\b/i.test(trimmed)) {
+    runtime.logger?.info({ src: "weekly-reckoning", weekNum }, "SOUL.md unchanged after week reflection");
+    return "soul unchanged.";
   }
-  const timestamp = Date.now();
-  const iso = new Date(timestamp).toISOString().replace(/:/g, "-").replace(/\..+/, "");
-  const backupPath = path.join(process.cwd(), "knowledge", "soul-backups", `SOUL_backup_${iso}.md`);
+  const start = trimmed.indexOf("# SOUL");
+  const proposed = start >= 0 ? trimmed.slice(start).trim() : "";
+  if (!proposed || proposed.length < 300) {
+    runtime.logger?.warn({ src: "weekly-reckoning", weekNum, length: trimmed.length }, "SOUL reflection returned neither 'unchanged' nor a complete SOUL — kept the current one");
+    await fs.appendFile(getProtocolPath(weekNum, "choices"), `\n${"═".repeat(50)}\n\nSOUL reflection returned no complete SOUL; the current one was kept.\n`, "utf-8").catch(() => {});
+    return "soul kept (reflection incomplete).";
+  }
+
+  const { text: finalSoul, restored } = keepSoulHardRules(currentSoul, proposed);
+  const isoFile = new Date().toISOString().replace(/:/g, "-").replace(/\..+/, "");
+  const backupName = `SOUL_backup_${isoFile}.md`;
+  const backupPath = path.join(process.cwd(), "knowledge", "soul-backups", backupName);
   await fs.mkdir(path.dirname(backupPath), { recursive: true });
   await fs.writeFile(backupPath, currentSoul, "utf-8");
-  await fs.writeFile(soulPath, trimmed, "utf-8");
-  runtime.logger?.info({ src: "weekly-reckoning", weekNum, backupPath }, "SOUL.md rewritten after week reflection");
-  const choicesPath = getProtocolPath(weekNum, "choices");
-  await fs.appendFile(choicesPath, `\n${"═".repeat(50)}\n\nSOUL.md rewritten after this week's choices.\nbackup: ${path.basename(backupPath)}\n`, "utf-8");
+  await fs.writeFile(soulPath, finalSoul.trimEnd() + "\n", "utf-8");
+  runtime.logger?.info({ src: "weekly-reckoning", weekNum, backupPath, restored }, "SOUL.md rewritten after week reflection");
+
+  const iso = new Date().toISOString();
+  await appendSoulChangeToDecisionLog(weekNum, {
+    timestamp: iso.replace("Z", ""),
+    bot_name: "the_girl",
+    session_id: `week_${String(weekNum).padStart(2, "0")}_reckoning`,
+    soul_change: { timestamp: iso, backup_file: backupName, trigger: "weekly_choices_reflection", hard_rules_restored: restored },
+  });
+  await fs.appendFile(getProtocolPath(weekNum, "choices"), `\n${"═".repeat(50)}\n\nSOUL.md rewritten after this week's choices.\nbackup: ${backupName}${restored ? "\nthe hard rules section was restored." : ""}\n`, "utf-8");
+  try {
+    await fs.mkdir(path.join(process.cwd(), "protocols"), { recursive: true });
+    await fs.appendFile(path.join(process.cwd(), "protocols", "changes.md"), `${iso.slice(0, 10)}: SOUL rewritten by The Girl (week ${weekNum} reckoning). Backup: knowledge/soul-backups/${backupName}.${restored ? " Hard rules section restored." : ""}\n`, "utf-8");
+  } catch { /* optional record */ }
+  return restored ? "soul rewritten (hard rules kept)." : "soul rewritten.";
 }
 
 async function readAvatarCrystallization(): Promise<string> {
@@ -479,6 +639,9 @@ const weeklyReckoningAction: Action = {
     const { chosen: chosenSpell, reasoning: spellReasoning } = await chooseSpell(runtime, spellCandidates);
     try { await postTextToTelegram(chosenSpell.text, telegramToken, telegramChatId); runtime.logger?.info({ src: "weekly-reckoning" }, "Spell posted to Telegram"); }
     catch (err) { runtime.logger?.error({ src: "weekly-reckoning", err }, "Failed to post spell to Telegram"); }
+    let spellCastStatus = "not cast";
+    try { spellCastStatus = await castSpellToFarcaster(chosenSpell.text); runtime.logger?.info({ src: "weekly-reckoning" }, "Spell Farcaster: " + spellCastStatus); }
+    catch (err) { spellCastStatus = "failed"; runtime.logger?.error({ src: "weekly-reckoning", err }, "Failed to cast spell to Farcaster"); }
     runtime.logger?.info({ src: "weekly-reckoning" }, "Generating body candidates...");
     const { candidates: bodyPrompts, crystallization: bodyCrystallization } = await generateBodyPrompts(runtime, ledgers, chosenSpell.text);
     const bodyCandidates = await generateBodyCandidates(bodyPrompts, falApiKey, weekNum);
@@ -493,8 +656,9 @@ const weeklyReckoningAction: Action = {
     }
     await writeDiary(runtime, weekNum, ledgers);
     await writeChoices(runtime, weekNum, spellCandidates, chosenSpell, spellReasoning, bodyCandidates, chosenBody, bodyReasoning, bodySkipped);
-    await fs.appendFile(getProtocolPath(weekNum, "choices"), `\n${"═".repeat(50)}\n\nbody crystallization\n${"─".repeat(20)}\n\n${bodyCrystallization}\n\nfarcaster: ${bodyCastStatus}\n`, "utf-8");
-    await reflectOnSoul(runtime, weekNum, spellReasoning, bodyReasoning);
+    await fs.appendFile(getProtocolPath(weekNum, "choices"), `\n${"═".repeat(50)}\n\nbody crystallization\n${"─".repeat(20)}\n\n${bodyCrystallization}\n\nfarcaster — spell: ${spellCastStatus} · body: ${bodyCastStatus}\n`, "utf-8");
+    await writeBodyCrystallization(bodyCrystallization);
+    const soulStatus = await reflectOnSoul(runtime, weekNum, spellReasoning, bodyReasoning);
     runtime.logger?.info({ src: "weekly-reckoning" }, "Running avatar step...");
     const avatarStatus = await runAvatarStep(runtime, ledgers, chosenSpell.text, weekNum);
     runtime.logger?.info({ src: "weekly-reckoning" }, "Writing weekly summary...");
@@ -504,12 +668,17 @@ const weeklyReckoningAction: Action = {
     runtime.logger?.info({ src: "weekly-reckoning", weekNum }, "Weekly reckoning complete");
     try {
       const { execSync } = await import("child_process");
-      execSync("git -C /root/the-girl add protocols/ knowledge/facts/ knowledge/history/", { stdio: "pipe" });
-      execSync(`git -C /root/the-girl commit -m "week ${String(weekNum).padStart(2,"0")} protocols" --allow-empty`, { stdio: "pipe" });
-      execSync("git -C /root/the-girl push", { stdio: "pipe" });
+      const git = (args: string) => execSync(`git -C /root/the-girl ${args}`, { stdio: "pipe" });
+      git("add protocols/ knowledge/facts/ knowledge/history/ knowledge/SOUL.md knowledge/soul-backups/ alambic/decision_log/");
+      git(`commit -m "week ${String(weekNum).padStart(2,"0")} protocols" --allow-empty`);
+      // Team uploads via GitHub in between: merge them first. On a conflict the server's
+      // version wins (her SOUL, the measured ledgers); if the merge still fails, abort it.
+      try { git("pull --no-rebase --no-edit -X ours"); }
+      catch (err) { try { git("merge --abort"); } catch { /* nothing to abort */ } throw err; }
+      git("push");
       runtime.logger?.info({ src: "weekly-reckoning", weekNum }, "Protocols pushed to GitHub");
     } catch (err) { runtime.logger?.warn({ src: "weekly-reckoning" }, "GitHub push failed: " + String(err)); }
-    if (callback) { await callback({ text: `week ${weekNum} reckoning done. spell posted to telegram. ${bodySkipped ? "no body this week." : `body (video + audio) posted to telegram; farcaster: ${bodyCastStatus}.`} diary and choices written. soul reflected. ${avatarStatus} ${summaryStatus}` }); }
+    if (callback) { await callback({ text: `week ${weekNum} reckoning done. spell posted to telegram; farcaster: ${spellCastStatus}. ${bodySkipped ? "no body this week." : `body (video + audio) posted to telegram; farcaster: ${bodyCastStatus}.`} diary and choices written. ${soulStatus} ${avatarStatus} ${summaryStatus}` }); }
   },
   examples: [],
 };
