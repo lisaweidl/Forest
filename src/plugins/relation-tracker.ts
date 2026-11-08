@@ -16,6 +16,9 @@
  * against real keeper log lines.
  *
  * Time base: the PROJECT start (assets/project_start.json), as in weekly-reckoning.ts.
+ *
+ * Counting happens on every message; the hourly row is written on its own clock
+ * (checked every 10 minutes), so quiet hours are recorded as quiet hours.
  */
 
 import {
@@ -34,7 +37,7 @@ const PROJECT_START_PATH = path.join(process.cwd(), "assets", "project_start.jso
 const FACTS_DIR = path.join(process.cwd(), "knowledge", "facts");
 
 const relationState = {
-  lastWriteMs: 0,
+  running: false,
   responses: 0,
   senders: new Set<string>(),
 };
@@ -95,11 +98,22 @@ async function readRelationRows(filePath: string): Promise<RelationRow[]> {
   } catch { return []; }
 }
 
+function relRowTime(r: RelationRow): number {
+  return Date.parse(r.timestamp.replace(" UTC", "Z").replace(" ", "T"));
+}
+
+async function isRelationDue(): Promise<boolean> {
+  const existing = await readRelationRows(path.join(FACTS_DIR, "ledger_relation.md"));
+  if (existing.length === 0) return true;
+  const lastTs = relRowTime(existing[existing.length - 1]);
+  return isNaN(lastTs) || Date.now() - lastTs >= HOUR_MS;
+}
+
 async function writeRelationLedger(newRow: RelationRow): Promise<boolean> {
   const filePath = path.join(FACTS_DIR, "ledger_relation.md");
   const existing = await readRelationRows(filePath);
   if (existing.length > 0) {
-    const lastTs = new Date(existing[existing.length - 1].timestamp).getTime();
+    const lastTs = relRowTime(existing[existing.length - 1]);
     if (!isNaN(lastTs) && Date.now() - lastTs < HOUR_MS) return false;
   }
   const allRows = [...existing, newRow];
@@ -127,10 +141,17 @@ const relationEvaluator = {
       relationState.responses++;
       relationState.senders.add(String(sender));
     }
+    await recordRelation(runtime);
+  },
+  examples: [],
+};
 
+async function recordRelation(runtime: IAgentRuntime): Promise<void> {
+    if (relationState.running) return;
+    relationState.running = true;
     const now = Date.now();
-    if (now - relationState.lastWriteMs < HOUR_MS) return;
     try {
+      if (!(await isRelationDue())) return;
       const startMs = readProjectStartMs();
       const hours = Math.round(((now - startMs) / HOUR_MS) * 100) / 100;
       const week = Math.max(1, Math.floor((now - startMs) / WEEK_MS) + 1);
@@ -146,7 +167,6 @@ const relationEvaluator = {
       };
       await fs.mkdir(FACTS_DIR, { recursive: true });
       const written = await writeRelationLedger(newRow);
-      relationState.lastWriteMs = now;
       if (written) {
         // Only reset once the hour has actually been recorded.
         relationState.responses = 0;
@@ -155,15 +175,17 @@ const relationEvaluator = {
       }
     } catch (err) {
       runtime.logger?.warn({ src: "relation-tracker", err }, "Failed to update relation ledger");
-    }
-  },
-  examples: [],
-};
+    } finally { relationState.running = false; }
+}
 
 export const relationTrackerPlugin: Plugin = {
   name: "relation-tracker",
   description: "Counts responses and engaged parties across every message; writes one row per hour to ledger_relation.md.",
   evaluators: [relationEvaluator],
+  async init(_config: Record<string, string>, runtime: IAgentRuntime) {
+    setTimeout(() => recordRelation(runtime), 3 * 60 * 1000);
+    setInterval(() => recordRelation(runtime), 10 * 60 * 1000);
+  },
 };
 
 export default relationTrackerPlugin;

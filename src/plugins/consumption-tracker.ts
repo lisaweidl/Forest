@@ -4,7 +4,8 @@
  * Tracks real resource consumption autonomously.
  * Does NOT rely on The Girl mentioning these values.
  *
- * Runs as an ElizaOS evaluator after every message cycle; writes at most once per hour.
+ * Counts message cycles on every message; writes one row per hour on its own clock
+ * (checked every 10 minutes), so the standing debit is recorded in quiet hours too.
  * Reads transaction count from keeper log, calculates kWh/water
  * from fixed physical constants, writes ledger_consumption.md.
  *
@@ -58,7 +59,7 @@ const TOKENS_OUTPUT_PER_CYCLE = 500;
 interface SessionStats {
   messageCycles: number;       // persistent, since project start
   solanaTransactions: number;
-  lastLedgerWriteMs: number;   // in memory only — the file timestamp also guards
+  running: boolean;
 }
 
 // Project start written by weekly-reckoning.ts; falls back to now if missing.
@@ -84,7 +85,7 @@ function saveMessageCycles(n: number): void {
 const sessionStats: SessionStats = {
   messageCycles: loadMessageCycles(),
   solanaTransactions: 0,
-  lastLedgerWriteMs: 0,
+  running: false,
 };
 
 async function readKeeperTransactionCount(): Promise<number> {
@@ -174,7 +175,7 @@ async function writeConsumptionLedger(factsDir: string, newRow: ConsumptionRow):
   const existingRows = await readExistingRows(filePath);
   const now = Date.now();
   if (existingRows.length > 0) {
-    const lastTs = new Date(existingRows[existingRows.length - 1].timestamp).getTime();
+    const lastTs = Date.parse(existingRows[existingRows.length - 1].timestamp.replace(" UTC", "Z").replace(" ", "T"));
     if (!isNaN(lastTs) && now - lastTs < HOUR_MS) return;
   }
   const allRows = [...existingRows, newRow];
@@ -202,10 +203,24 @@ const consumptionEvaluator = {
   handler: async (runtime: IAgentRuntime, _message: Memory, _state: State | undefined): Promise<void> => {
     sessionStats.messageCycles++;
     saveMessageCycles(sessionStats.messageCycles);
+    await recordConsumption(runtime);
+  },
+  examples: [],
+};
+
+async function isConsumptionDue(): Promise<boolean> {
+  const rows = await readExistingRows(path.join(FACTS_DIR, "ledger_consumption.md"));
+  if (rows.length === 0) return true;
+  const lastTs = Date.parse(rows[rows.length - 1].timestamp.replace(" UTC", "Z").replace(" ", "T"));
+  return isNaN(lastTs) || Date.now() - lastTs >= HOUR_MS;
+}
+
+async function recordConsumption(runtime: IAgentRuntime): Promise<void> {
+    if (sessionStats.running) return;
+    sessionStats.running = true;
     const now = Date.now();
-    if (now - sessionStats.lastLedgerWriteMs < HOUR_MS) return;
-    sessionStats.lastLedgerWriteMs = now;
     try {
+      if (!(await isConsumptionDue())) return;
       sessionStats.solanaTransactions = await readKeeperTransactionCount();
       const projectStartMs = readProjectStartMs();
       const hoursSinceStart = Math.round(((now - projectStartMs) / HOUR_MS) * 100) / 100;
@@ -218,10 +233,8 @@ const consumptionEvaluator = {
       runtime.logger?.info({ src: "consumption-tracker", hours_since_start: hoursSinceStart, week, ...consumption }, "Consumption ledger updated");
     } catch (err) {
       runtime.logger?.warn({ src: "consumption-tracker", err }, "Failed to update consumption ledger");
-    }
-  },
-  examples: [],
-};
+    } finally { sessionStats.running = false; }
+}
 
 // --- Ledger Provider ---
 // Column names must match the headers the trackers actually write.
@@ -274,6 +287,10 @@ export const consumptionTrackerPlugin: Plugin = {
   description: "Autonomously tracks VM energy, water, transaction, and API cost consumption. Writes ledger_consumption.md at most once per hour. Provides the current ledger state and the full SOUL.md to every message.",
   evaluators: [consumptionEvaluator],
   providers: [ledgerProvider, soulProvider],
+  async init(_config: Record<string, string>, runtime: IAgentRuntime) {
+    setTimeout(() => recordConsumption(runtime), 4 * 60 * 1000);
+    setInterval(() => recordConsumption(runtime), 10 * 60 * 1000);
+  },
 };
 
 export default consumptionTrackerPlugin;
