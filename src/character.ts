@@ -14,6 +14,7 @@ export const character: Character = {
   plugins: [
     "@elizaos/plugin-bootstrap",
     "@elizaos/plugin-anthropic",
+    "@elizaos/plugin-ollama",
     "@elizaos/plugin-telegram",
     ledgerWriterPlugin,
     soulWriterPlugin,

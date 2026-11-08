@@ -33,7 +33,7 @@
     "@elizaos/plugin-anthropic": "^1.5.12",
     "@elizaos/plugin-bootstrap": "1.7.2",
     "@elizaos/plugin-farcaster": "^1.7.2",
-    "@elizaos/plugin-ollama": "^1.2.4",
+    "@elizaos/plugin-ollama": "1.2.4",
     "@elizaos/plugin-solana": "^1.2.6",
     "@elizaos/plugin-sql": "1.7.2",
     "@elizaos/plugin-telegram": "^1.6.4",
