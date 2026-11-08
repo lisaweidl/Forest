@@ -40,6 +40,7 @@ const DAILY_DIR = path.join(HISTORY_DIR, "daily");
 const SOUL_PATH = path.join(ROOT, "knowledge", "SOUL.md");
 const PROJECT_START_PATH = path.join(ROOT, "assets", "project_start.json");
 const DAILY_STATE_PATH = path.join(ROOT, "assets", "last_daily_status.json");
+const DECISION_LOG_DIR = path.join(ROOT, "alambic", "decision_log");
 
 // Relation counts before this moment were faulty (always 1) and are left out of sums.
 const RELATION_RELIABLE_FROM = Date.parse("2026-11-08T18:00:00Z");
@@ -162,6 +163,28 @@ async function readDailiesSince(sinceMs: number): Promise<string> {
 
 // ── 1. daily status ───────────────────────────────────────────────────────────
 
+// The morning decision from decision-cycle.ts (07:00), if there is one from the last 24 hours.
+async function latestDecisionLine(): Promise<string | null> {
+  try {
+    const files = (await fs.readdir(DECISION_LOG_DIR)).filter((f) => f.endsWith(".json")).sort();
+    const entries: any[] = [];
+    for (const f of files) {
+      try { const d = JSON.parse(await fs.readFile(path.join(DECISION_LOG_DIR, f), "utf-8")); if (Array.isArray(d)) entries.push(...d); } catch { /* skip */ }
+    }
+    const e = entries.filter((x) => x?.mode === "autonomous" && x?.decision && Date.now() - Date.parse(x.timestamp + "Z") < DAY_MS).pop();
+    if (!e) return null;
+    const a = e.decision.action;
+    const isMove = ["buy", "sell", "dissipate"].includes(a);
+    const amt = e.outcome === "executed" ? e.decision.executed_amount_usdc : (e.decision.allowed_amount_usdc ?? e.decision.amount_usdc);
+    const what = a === "buy" ? `buy ${amt} usdc → sol` : a === "sell" ? `sell ${amt} usdc of sol` : a === "dissipate" ? `give ${amt} usdc to wewilder` : a;
+    const how = e.outcome === "executed" ? "done"
+      : e.outcome === "reverted" ? "failed"
+      : isMove && Number(amt) < 0.5 ? "not executed"
+      : isMove && e.execution?.trading_enabled === false ? "dry run" : "";
+    return how ? `${what} (${how})` : what;
+  } catch { return null; }
+}
+
 async function buildDailyNumbers(): Promise<string> {
   const now = Date.now();
   const price = parseRows(await readLedger("price"));
@@ -188,6 +211,7 @@ async function buildDailyNumbers(): Promise<string> {
     "",
     "relation (24h)",
     rel.length ? `responses ${sum(5)} · refusals ${sum(3)} · gifts ${sum(4)}` : "no reliable rows yet",
+    ...((d) => (d ? ["", "decision", d] : []))(await latestDecisionLine()),
   ].join("\n");
 }
 
