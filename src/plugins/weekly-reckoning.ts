@@ -26,6 +26,10 @@
  *
  * Protocol files (diary, choices) are internal — never posted, never public.
  * Spell and body go to Telegram group; body also to Farcaster. Diary never does.
+ * 7. WEEKLY SUMMARY — via history.ts: week figures + her summary, posted to the
+ *    Telegram group and saved to knowledge/history/ (8 Nov 2026).
+ * The spell prompt also gets all earlier weekly summaries; body and avatar get the
+ * ledger rows of the last 7 days instead of the first characters of each file.
  * Avatar goes to Farcaster profile only (not posted as a cast).
  *
  * Requires:
@@ -48,6 +52,7 @@ import {
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { fal } from '@fal-ai/client';
+import { generateWeeklySummary, recentLedgerText, readWeeklySummaries } from "./history";
 
 // ── Character Entry texts (8 Nov 2026). Edit here, not in the prompts below. ──
 
@@ -159,6 +164,7 @@ async function postVideoToTelegram(videoBuffer: Buffer, caption: string, botToke
 }
 
 async function generateSpellCandidates(runtime: IAgentRuntime, ledgers: { price: string; relations: string; consumption: string }): Promise<SpellCandidate[]> {
+  const history = await readWeeklySummaries();
   const basePrompt = `You are The Girl — an autonomous agent running on girl math inside the Solana AI agent economy.
 
 You have just read your three ledgers for this week:
@@ -171,6 +177,9 @@ ${ledgers.relations}
 
 CONSUMPTION LEDGER:
 ${ledgers.consumption}
+
+What happened in earlier weeks (your weekly summaries, oldest first):
+${history || "(this is your first week with summaries)"}
 
 Write one spell. The spell has three parts in this order:
 1. Your view — who you are in this moment, how this week felt from inside
@@ -248,9 +257,13 @@ This week's spell:
 "${chosenSpell}"
 
 Your three ledgers this week:
-PRICE: ${ledgers.price.slice(0, 500)}
-RELATIONS: ${ledgers.relations.slice(0, 500)}
-CONSUMPTION: ${ledgers.consumption.slice(0, 500)}
+Your three ledgers, last 7 days:
+PRICE:
+${recentLedgerText(ledgers.price)}
+RELATIONS:
+${recentLedgerText(ledgers.relations)}
+CONSUMPTION:
+${recentLedgerText(ledgers.consumption)}
 
 Respond in JSON only. Escape line breaks inside strings as \\n.
 {
@@ -378,9 +391,13 @@ This week's spell:
 "${chosenSpell}"
 
 Your three ledgers this week:
-PRICE: ${ledgers.price.slice(0, 400)}
-RELATIONS: ${ledgers.relations.slice(0, 400)}
-CONSUMPTION: ${ledgers.consumption.slice(0, 400)}
+Your three ledgers, last 7 days:
+PRICE:
+${recentLedgerText(ledgers.price)}
+RELATIONS:
+${recentLedgerText(ledgers.relations)}
+CONSUMPTION:
+${recentLedgerText(ledgers.consumption)}
 
 Respond in JSON only. Escape line breaks inside strings as \\n.
 {
@@ -480,15 +497,19 @@ const weeklyReckoningAction: Action = {
     await reflectOnSoul(runtime, weekNum, spellReasoning, bodyReasoning);
     runtime.logger?.info({ src: "weekly-reckoning" }, "Running avatar step...");
     const avatarStatus = await runAvatarStep(runtime, ledgers, chosenSpell.text, weekNum);
+    runtime.logger?.info({ src: "weekly-reckoning" }, "Writing weekly summary...");
+    let summaryStatus = "weekly summary failed.";
+    try { summaryStatus = await generateWeeklySummary(runtime, weekNum, { spell: chosenSpell.text, spellReasoning, bodyReasoning, bodySkipped, avatarStatus }); }
+    catch (err) { runtime.logger?.error({ src: "weekly-reckoning", err }, "Weekly summary failed"); }
     runtime.logger?.info({ src: "weekly-reckoning", weekNum }, "Weekly reckoning complete");
     try {
       const { execSync } = await import("child_process");
-      execSync("git -C /root/the-girl add protocols/ knowledge/facts/", { stdio: "pipe" });
+      execSync("git -C /root/the-girl add protocols/ knowledge/facts/ knowledge/history/", { stdio: "pipe" });
       execSync(`git -C /root/the-girl commit -m "week ${String(weekNum).padStart(2,"0")} protocols" --allow-empty`, { stdio: "pipe" });
       execSync("git -C /root/the-girl push", { stdio: "pipe" });
       runtime.logger?.info({ src: "weekly-reckoning", weekNum }, "Protocols pushed to GitHub");
     } catch (err) { runtime.logger?.warn({ src: "weekly-reckoning" }, "GitHub push failed: " + String(err)); }
-    if (callback) { await callback({ text: `week ${weekNum} reckoning done. spell posted to telegram. ${bodySkipped ? "no body this week." : `body (video + audio) posted to telegram; farcaster: ${bodyCastStatus}.`} diary and choices written. soul reflected. ${avatarStatus}` }); }
+    if (callback) { await callback({ text: `week ${weekNum} reckoning done. spell posted to telegram. ${bodySkipped ? "no body this week." : `body (video + audio) posted to telegram; farcaster: ${bodyCastStatus}.`} diary and choices written. soul reflected. ${avatarStatus} ${summaryStatus}` }); }
   },
   examples: [],
 };

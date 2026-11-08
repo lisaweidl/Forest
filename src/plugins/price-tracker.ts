@@ -2,7 +2,15 @@
  * price-tracker.ts
  * Autonomously records SOL price and USDC balance every hour.
  * Writes to ledger_price.md.
- * Columns: Time (UTC) | Week | Uptime (h) | SOL price (USD) | USDC balance | SOL balance | Note
+ * Columns: Time (UTC) | Week | Hours since start | SOL price (USD) | USDC balance | SOL balance | Note
+ *
+ * Time base: the PROJECT start (assets/project_start.json), not the process start,
+ * so week and hours don't reset when the agent restarts. Week = same formula as
+ * weekly-reckoning.ts.
+ * Failed lookups are written as "—" with a note, never as 0 — a 0 would read
+ * as a real price or an empty wallet.
+ * Existing rows are kept exactly as written (stored as text), so older rows
+ * with their old week/uptime values stay unchanged.
  */
 
 import {
@@ -12,53 +20,64 @@ import {
   type State,
 } from "@elizaos/core";
 import * as fs from "node:fs/promises";
+import * as fsSync from "node:fs";
 import * as path from "node:path";
 
-const priceState = {
-  sessionStartMs: Date.now(),
-  lastWriteMs: 0,
-};
+const HOUR_MS = 60 * 60 * 1000;
+const WEEK_MS = 7 * 24 * HOUR_MS;
+const PROJECT_START_PATH = path.join(process.cwd(), "assets", "project_start.json");
+const FACTS_DIR = path.join(process.cwd(), "knowledge", "facts");
 
-async function getSolPrice(): Promise<number> {
+const priceState = { lastWriteMs: 0 };
+
+function readProjectStartMs(): number {
   try {
-    const { default: fetch } = await import("node-fetch");
-    const res = await (fetch as any)("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd", { signal: AbortSignal.timeout(8000) });
-    const json = await (res as any).json() as any;
-    return parseFloat(json?.solana?.usd ?? "0") || 0;
-  } catch { return 0; }
+    const { startTimestamp } = JSON.parse(fsSync.readFileSync(PROJECT_START_PATH, "utf-8"));
+    return typeof startTimestamp === "number" ? startTimestamp : Date.now();
+  } catch { return Date.now(); }
 }
 
-async function getBalances(): Promise<{ usdc: number; sol: number }> {
+async function getSolPrice(): Promise<number | null> {
+  try {
+    const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd", { signal: AbortSignal.timeout(8000) });
+    const json = await res.json() as { solana?: { usd?: number } };
+    const price = Number(json?.solana?.usd);
+    return Number.isFinite(price) && price > 0 ? price : null;
+  } catch { return null; }
+}
+
+async function getBalances(): Promise<{ usdc: number; sol: number } | null> {
   try {
     const walletAddress = process.env.SOLANA_PUBLIC_KEY ?? "";
-    if (!walletAddress) return { usdc: 0, sol: 0 };
-    const { default: fetch } = await import("node-fetch");
+    if (!walletAddress) return null;
     const rpcUrl = process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com";
-    const solRes = await (fetch as any)(rpcUrl, {
+    const solRes = await fetch(rpcUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getBalance", params: [walletAddress] }),
       signal: AbortSignal.timeout(8000),
     });
-    const solJson = await (solRes as any).json() as any;
-    const sol = (solJson?.result?.value ?? 0) / 1e9;
+    const solJson = await solRes.json() as any;
+    if (solJson?.error || solJson?.result?.value === undefined) return null;
+    const sol = solJson.result.value / 1e9;
     const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-    const usdcRes = await (fetch as any)(rpcUrl, {
+    const usdcRes = await fetch(rpcUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "getTokenAccountsByOwner", params: [walletAddress, { mint: USDC_MINT }, { encoding: "jsonParsed" }] }),
       signal: AbortSignal.timeout(8000),
     });
-    const usdcJson = await (usdcRes as any).json() as any;
-    const accounts = usdcJson?.result?.value ?? [];
-    const usdc = accounts.reduce((sum: number, acc: any) => sum + parseFloat(acc?.account?.data?.parsed?.info?.tokenAmount?.uiAmount ?? "0"), 0);
+    const usdcJson = await usdcRes.json() as any;
+    if (usdcJson?.error || !Array.isArray(usdcJson?.result?.value)) return null;
+    const usdc = usdcJson.result.value.reduce((sum: number, acc: any) => sum + parseFloat(acc?.account?.data?.parsed?.info?.tokenAmount?.uiAmount ?? "0"), 0);
     return { usdc: Math.round(usdc * 100) / 100, sol: Math.round(sol * 10000) / 10000 };
-  } catch { return { usdc: 0, sol: 0 }; }
+  } catch { return null; }
 }
 
+// All cells as text so existing rows are rewritten exactly as they were.
 interface PriceRow {
-  timestamp: string; week: number; uptime_h: number;
-  sol_price_usd: number; usdc_balance: number; sol_balance: number; note: string;
+  timestamp: string; week: string; hours: string;
+  sol_price_usd: string; usdc_balance: string; sol_balance: string; note: string;
 }
 
 async function readPriceRows(filePath: string): Promise<PriceRow[]> {
@@ -66,31 +85,33 @@ async function readPriceRows(filePath: string): Promise<PriceRow[]> {
     const content = await fs.readFile(filePath, "utf-8");
     const rows: PriceRow[] = [];
     for (const line of content.split("\n")) {
-      if (!line.startsWith("|") || line.startsWith("| Time") || line.startsWith("|---")) continue;
-      const cells = line.split("|").map(c => c.trim()).filter(Boolean);
-      if (cells.length < 7 || cells[0] === "—") continue;
-      rows.push({ timestamp: cells[0], week: parseInt(cells[1]) || 1, uptime_h: parseFloat(cells[2]) || 0, sol_price_usd: parseFloat(cells[3]) || 0, usdc_balance: parseFloat(cells[4]) || 0, sol_balance: parseFloat(cells[5]) || 0, note: cells[6] ?? "" });
+      if (!line.startsWith("| 2")) continue; // data rows start with the year
+      const cells = line.split("|").slice(1, -1).map(c => c.trim());
+      if (cells.length < 6) continue;
+      rows.push({ timestamp: cells[0], week: cells[1], hours: cells[2], sol_price_usd: cells[3], usdc_balance: cells[4], sol_balance: cells[5], note: cells[6] ?? "" });
     }
     return rows;
   } catch { return []; }
 }
 
-async function writePriceLedger(factsDir: string, newRow: PriceRow): Promise<void> {
-  const filePath = path.join(factsDir, "ledger_price.md");
+async function writePriceLedger(newRow: PriceRow): Promise<boolean> {
+  const filePath = path.join(FACTS_DIR, "ledger_price.md");
   const existing = await readPriceRows(filePath);
-  const oneHourMs = 60 * 60 * 1000;
   if (existing.length > 0) {
     const lastTs = new Date(existing[existing.length - 1].timestamp).getTime();
-    if (!isNaN(lastTs) && Date.now() - lastTs < oneHourMs) return;
+    if (!isNaN(lastTs) && Date.now() - lastTs < HOUR_MS) return false;
   }
   const allRows = [...existing, newRow];
   let md = `# Price Ledger\n\n*Accumulating record of value and market position. Updated every hour.*\n\n`;
-  md += `| Time (UTC) | Week | Uptime (h) | SOL price (USD) | USDC balance | SOL balance | Note |\n`;
+  md += `*Week and hours count from the project start (6 Oct 2026). Rows before 8 Nov 2026 counted from the last agent restart. "—" means the lookup failed that hour.*\n\n`;
+  md += `| Time (UTC) | Week | Hours since start | SOL price (USD) | USDC balance | SOL balance | Note |\n`;
   md += `|---|---|---|---|---|---|---|\n`;
-  if (allRows.length === 0) { md += `| — | — | — | — | — | — | — |\n`; }
-  else { for (const row of allRows) { md += `| ${row.timestamp} | ${row.week} | ${row.uptime_h} | ${row.sol_price_usd} | ${row.usdc_balance} | ${row.sol_balance} | ${row.note} |\n`; } }
+  for (const r of allRows) {
+    md += `| ${r.timestamp} | ${r.week} | ${r.hours} | ${r.sol_price_usd} | ${r.usdc_balance} | ${r.sol_balance} | ${r.note} |\n`;
+  }
   md += `\n*This ledger is a standing account. It does not flatter or condemn. It records.*\n`;
   await fs.writeFile(filePath, md, "utf-8");
+  return true;
 }
 
 const priceEvaluator = {
@@ -99,21 +120,28 @@ const priceEvaluator = {
   alwaysRun: true,
   validate: async (_runtime: IAgentRuntime, _message: Memory): Promise<boolean> => true,
   handler: async (runtime: IAgentRuntime, _message: Memory, _state: State | undefined): Promise<void> => {
-    const oneHourMs = 60 * 60 * 1000;
     const now = Date.now();
-    if (now - priceState.lastWriteMs < oneHourMs) return;
+    if (now - priceState.lastWriteMs < HOUR_MS) return;
     priceState.lastWriteMs = now;
     try {
-      const uptimeMs = now - priceState.sessionStartMs;
-      const uptimeHours = Math.round((uptimeMs / (1000 * 60 * 60)) * 100) / 100;
-      const week = Math.max(1, Math.ceil(uptimeHours / 168));
+      const startMs = readProjectStartMs();
+      const hours = Math.round(((now - startMs) / HOUR_MS) * 100) / 100;
+      const week = Math.max(1, Math.floor((now - startMs) / WEEK_MS) + 1);
       const [solPrice, balances] = await Promise.all([getSolPrice(), getBalances()]);
+      const notes: string[] = [];
+      if (solPrice === null) notes.push("price unavailable");
+      if (balances === null) notes.push("balance unavailable");
       const timestamp = new Date(now).toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
-      const newRow: PriceRow = { timestamp, week, uptime_h: uptimeHours, sol_price_usd: solPrice, usdc_balance: balances.usdc, sol_balance: balances.sol, note: "" };
-      const factsDir = path.join(process.cwd(), "knowledge", "facts");
-      await fs.mkdir(factsDir, { recursive: true });
-      await writePriceLedger(factsDir, newRow);
-      runtime.logger?.info({ src: "price-tracker", sol_price: solPrice, usdc: balances.usdc, sol: balances.sol }, "Price ledger updated");
+      const newRow: PriceRow = {
+        timestamp, week: String(week), hours: String(hours),
+        sol_price_usd: solPrice === null ? "—" : String(solPrice),
+        usdc_balance: balances === null ? "—" : String(balances.usdc),
+        sol_balance: balances === null ? "—" : String(balances.sol),
+        note: notes.join(", "),
+      };
+      await fs.mkdir(FACTS_DIR, { recursive: true });
+      const written = await writePriceLedger(newRow);
+      if (written) runtime.logger?.info({ src: "price-tracker", week, sol_price: solPrice, usdc: balances?.usdc, sol: balances?.sol }, "Price ledger updated");
     } catch (err) {
       runtime.logger?.warn({ src: "price-tracker", err }, "Failed to update price ledger");
     }

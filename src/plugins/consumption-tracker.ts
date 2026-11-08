@@ -240,13 +240,13 @@ export const ledgerProvider = {
     };
     return { text: `CURRENT LEDGER STATE (last entry each):
 
-PRICE LEDGER (columns: Time | Week | Uptime_h | SOL_price_USD | USDC_balance | SOL_balance | Note):
+PRICE LEDGER (columns: Time | Week | Hours_since_project_start | SOL_price_USD | USDC_balance | SOL_balance | Note; "—" = lookup failed):
 ${read("ledger_price.md")}
 
 CONSUMPTION LEDGER (columns: Time | Week | Hours_since_project_start | Transactions | kWh | Water_L | VM_cost_EUR | API_cost_EUR_estimated):
 ${read("ledger_consumption.md")}
 
-RELATION LEDGER (columns: Time | Week | Uptime_h | Refusals | Gifts_sent | Responses_received | Agents_engaged | Notes):
+RELATION LEDGER (columns: Time | Week | Hours_since_project_start | Refusals | Gifts_sent | Responses_received_this_hour | Distinct_senders_this_hour | Notes):
 ${read("ledger_relation.md")}` };
   }
 };
