@@ -63,6 +63,6 @@ Read SOUL.md at the start of every cycle.`,
     "knowledge/facts/ledger_consumption.md",
   ],
   settings: {
-    model: "claude-sonnet-4-5",
+    model: "claude-sonnet-5-5",
   },
 };
