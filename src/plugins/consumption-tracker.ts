@@ -4,18 +4,30 @@
  * Tracks real resource consumption autonomously.
  * Does NOT rely on The Girl mentioning these values.
  *
- * Runs as an ElizaOS evaluator after every message cycle.
+ * Runs as an ElizaOS evaluator after every message cycle; writes at most once per hour.
  * Reads transaction count from keeper log, calculates kWh/water
  * from fixed physical constants, writes ledger_consumption.md.
+ *
+ * Time base: the PROJECT start (assets/project_start.json), not the process start.
+ * The VM runs continuously, so energy, water and VM cost accrue since the project
+ * began — a restart of the agent does not reset them. Week = project week,
+ * same formula as weekly-reckoning.ts.
+ *
+ * API cost: message cycles are counted persistently in assets/consumption_state.json
+ * (survives restarts) and priced with an ESTIMATE of tokens per cycle.
  *
  * Constants (Hetzner CX22, NBG1 datacenter):
  *   VM power draw:  ~8W continuous = 0.008 kWh/h
  *   PUE:            1.3 (datacenter overhead)
  *   WUE:            1.6 L/kWh (water usage effectiveness)
  *   VM cost:        €3.79/month = ~€0.000174/h (CX22 Hetzner)
- *   API cost:       estimated from token usage at Anthropic pricing
- *     claude-3-5-haiku: $0.80/M input, $4.00/M output tokens
- *     (≈ €0.75/M input, €3.75/M output at 0.94 EUR/USD)
+ *   API cost:       claude-sonnet-5-5 (since 8 Nov 2026): $2/M input, $10/M output
+ *     (≈ €1.88/M input, €9.40/M output at 0.94 EUR/USD)
+ *     Before 8 Nov 2026 the agent ran on claude-sonnet-4-5.
+ *
+ * Also exports two providers:
+ *   ledgerProvider — the last row of each ledger, read fresh on every message
+ *   soulProvider   — the full knowledge/SOUL.md, read fresh on every message
  */
 
 import {
@@ -32,22 +44,46 @@ const VM_WATTS = 8;
 const PUE = 1.3;
 const WUE = 1.6;
 const VM_COST_PER_HOUR_EUR = 3.79 / (30 * 24);
-const INPUT_TOKEN_COST_EUR_PER_M = 0.75;
-const OUTPUT_TOKEN_COST_EUR_PER_M = 3.75;
-const TOKENS_INPUT_PER_CYCLE = 2000;
+const INPUT_TOKEN_COST_EUR_PER_M = 1.88;   // claude-sonnet-5-5, $2/M
+const OUTPUT_TOKEN_COST_EUR_PER_M = 9.40;  // claude-sonnet-5-5, $10/M
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+const PROJECT_START_PATH = path.join(process.cwd(), "assets", "project_start.json");
+const STATE_PATH = path.join(process.cwd(), "assets", "consumption_state.json");
+const SOUL_PATH = path.join(process.cwd(), "knowledge", "SOUL.md");
+const FACTS_DIR = path.join(process.cwd(), "knowledge", "facts");
+const TOKENS_INPUT_PER_CYCLE = 5000;   // estimate: prompt + context + ~3k tokens SOUL provider
 const TOKENS_OUTPUT_PER_CYCLE = 500;
 
 interface SessionStats {
-  messageCycles: number;
+  messageCycles: number;       // persistent, since project start
   solanaTransactions: number;
-  sessionStartMs: number;
-  lastLedgerWriteMs: number;
+  lastLedgerWriteMs: number;   // in memory only — the file timestamp also guards
+}
+
+// Project start written by weekly-reckoning.ts; falls back to now if missing.
+function readProjectStartMs(): number {
+  try {
+    const { startTimestamp } = JSON.parse(fsSync.readFileSync(PROJECT_START_PATH, "utf-8"));
+    return typeof startTimestamp === "number" ? startTimestamp : Date.now();
+  } catch { return Date.now(); }
+}
+
+function loadMessageCycles(): number {
+  try {
+    const { messageCycles } = JSON.parse(fsSync.readFileSync(STATE_PATH, "utf-8"));
+    return typeof messageCycles === "number" ? messageCycles : 0;
+  } catch { return 0; }
+}
+
+function saveMessageCycles(n: number): void {
+  try { fsSync.writeFileSync(STATE_PATH, JSON.stringify({ messageCycles: n, updated: new Date().toISOString() })); }
+  catch { /* counting is best-effort; never block a message cycle */ }
 }
 
 const sessionStats: SessionStats = {
-  messageCycles: 0,
+  messageCycles: loadMessageCycles(),
   solanaTransactions: 0,
-  sessionStartMs: Date.now(),
   lastLedgerWriteMs: 0,
 };
 
@@ -136,17 +172,16 @@ async function readExistingRows(filePath: string): Promise<ConsumptionRow[]> {
 async function writeConsumptionLedger(factsDir: string, newRow: ConsumptionRow): Promise<void> {
   const filePath = path.join(factsDir, "ledger_consumption.md");
   const existingRows = await readExistingRows(filePath);
-  const thirtyMinMs = 60 * 60 * 1000;
   const now = Date.now();
   if (existingRows.length > 0) {
     const lastTs = new Date(existingRows[existingRows.length - 1].timestamp).getTime();
-    if (!isNaN(lastTs) && now - lastTs < thirtyMinMs) return;
+    if (!isNaN(lastTs) && now - lastTs < HOUR_MS) return;
   }
   const allRows = [...existingRows, newRow];
   let markdown = `# Consumption Ledger\n\n`;
   markdown += `*Accumulating record of what it costs to exist. Updated every hour.*\n\n`;
-  markdown += `*Constants: Hetzner CX22 NBG1 — 8W draw, PUE 1.3, WUE 1.6 L/kWh, €3.79/mo VM.*\n\n`;
-  markdown += `| Time (UTC) | Week | Uptime (h) | Transactions | Estimated kWh | Water (litres) | VM cost (€) | API cost (€) |\n`;
+  markdown += `*Constants: Hetzner CX22 NBG1 — 8W draw, PUE 1.3, WUE 1.6 L/kWh, €3.79/mo VM. Hours, kWh, water and VM cost count from the project start (6 Oct 2026). API cost is an estimate (claude-sonnet-5-5 since 8 Nov 2026). Rows before 8 Nov 2026 counted from the last agent restart and are lower.*\n\n`;
+  markdown += `| Time (UTC) | Week | Hours since start | Transactions | Estimated kWh | Water (litres) | VM cost (€) | API cost (€) |\n`;
   markdown += `|---|---|---|---|---|---|---|---|\n`;
   if (allRows.length === 0) {
     markdown += `| — | — | — | — | — | — | — | — |\n`;
@@ -161,27 +196,26 @@ async function writeConsumptionLedger(factsDir: string, newRow: ConsumptionRow):
 
 const consumptionEvaluator = {
   name: "CONSUMPTION_TRACKER",
-  description: "Tracks real resource consumption (VM, energy, water, API) and writes ledger_consumption.md every 30 minutes.",
+  description: "Tracks real resource consumption (VM, energy, water, API) and writes ledger_consumption.md at most once per hour.",
   alwaysRun: true,
   validate: async (_runtime: IAgentRuntime, _message: Memory): Promise<boolean> => true,
   handler: async (runtime: IAgentRuntime, _message: Memory, _state: State | undefined): Promise<void> => {
     sessionStats.messageCycles++;
-    const thirtyMinMs = 60 * 60 * 1000;
+    saveMessageCycles(sessionStats.messageCycles);
     const now = Date.now();
-    if (now - sessionStats.lastLedgerWriteMs < thirtyMinMs) return;
+    if (now - sessionStats.lastLedgerWriteMs < HOUR_MS) return;
     sessionStats.lastLedgerWriteMs = now;
     try {
       sessionStats.solanaTransactions = await readKeeperTransactionCount();
-      const uptimeMs = now - sessionStats.sessionStartMs;
-      const uptimeHours = Math.round((uptimeMs / (1000 * 60 * 60)) * 100) / 100;
-      const consumption = calculateConsumption(sessionStats, uptimeHours);
+      const projectStartMs = readProjectStartMs();
+      const hoursSinceStart = Math.round(((now - projectStartMs) / HOUR_MS) * 100) / 100;
+      const consumption = calculateConsumption(sessionStats, hoursSinceStart);
       const timestamp = new Date(now).toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
-      const week = Math.max(1, Math.ceil(uptimeHours / 168));
-      const newRow: ConsumptionRow = { timestamp, week, uptime_h: uptimeHours, ...consumption };
-      const factsDir = path.join(process.cwd(), "knowledge", "facts");
-      await fs.mkdir(factsDir, { recursive: true });
-      await writeConsumptionLedger(factsDir, newRow);
-      runtime.logger?.info({ src: "consumption-tracker", uptime_h: uptimeHours, ...consumption }, "Consumption ledger updated");
+      const week = Math.max(1, Math.floor((now - projectStartMs) / WEEK_MS) + 1);
+      const newRow: ConsumptionRow = { timestamp, week, uptime_h: hoursSinceStart, ...consumption };
+      await fs.mkdir(FACTS_DIR, { recursive: true });
+      await writeConsumptionLedger(FACTS_DIR, newRow);
+      runtime.logger?.info({ src: "consumption-tracker", hours_since_start: hoursSinceStart, week, ...consumption }, "Consumption ledger updated");
     } catch (err) {
       runtime.logger?.warn({ src: "consumption-tracker", err }, "Failed to update consumption ledger");
     }
@@ -190,30 +224,56 @@ const consumptionEvaluator = {
 };
 
 // --- Ledger Provider ---
+// Column names must match the headers the trackers actually write.
 export const ledgerProvider = {
   name: "LEDGER_STATE",
   dynamic: false,
   description: "Current state of all three ledgers",
-  get: async (_runtime: IAgentRuntime, _message: Memory): Promise<string> => {
-    const base = "/root/the-girl/knowledge/facts";
+  get: async (_runtime: IAgentRuntime, _message: Memory): Promise<{ text: string }> => {
     const read = (file: string): string => {
       try {
-        const lines = fsSync.readFileSync(`${base}/${file}`, "utf8")
+        return fsSync.readFileSync(path.join(FACTS_DIR, file), "utf8")
           .split("\n")
           .filter(l => l.startsWith("| 2"))
           .slice(-1)[0] ?? "no data yet";
-        return lines;
       } catch { return "not available"; }
     };
-    return { text: `CURRENT LEDGER STATE (last entry each):\n\nPRICE LEDGER (columns: Time | Week | Inflow_USDC | Balance_USDC | Outflow_USDC | SOL_balance | Notes):\n${read("ledger_price.md")}\n\nCONSUMPTION LEDGER (columns: Time | Week | Uptime_h | Transactions | kWh | Water_L | VM_cost_EUR | API_cost_EUR):\n${read("ledger_consumption.md")}\n\nRELATION LEDGER (columns: Time | Week | Uptime_h | Refusals | Gifts_sent | Responses_received | Agents_engaged | Notes):\n${read("ledger_relation.md")}` };
+    return { text: `CURRENT LEDGER STATE (last entry each):
+
+PRICE LEDGER (columns: Time | Week | Uptime_h | SOL_price_USD | USDC_balance | SOL_balance | Note):
+${read("ledger_price.md")}
+
+CONSUMPTION LEDGER (columns: Time | Week | Hours_since_project_start | Transactions | kWh | Water_L | VM_cost_EUR | API_cost_EUR_estimated):
+${read("ledger_consumption.md")}
+
+RELATION LEDGER (columns: Time | Week | Uptime_h | Refusals | Gifts_sent | Responses_received | Agents_engaged | Notes):
+${read("ledger_relation.md")}` };
+  }
+};
+
+// --- SOUL Provider ---
+// Reads knowledge/SOUL.md fresh on every message, so a rewrite during the
+// weekly reckoning or via WRITE_SOUL takes effect from the next message on —
+// no restart, no re-indexing.
+export const soulProvider = {
+  name: "SOUL",
+  dynamic: false,
+  description: "The full current SOUL.md",
+  get: async (_runtime: IAgentRuntime, _message: Memory): Promise<{ text: string }> => {
+    try {
+      const soul = fsSync.readFileSync(SOUL_PATH, "utf8").trim();
+      return { text: `YOUR SOUL.md (current version, read just now):\n\n${soul}` };
+    } catch {
+      return { text: "SOUL.md could not be read right now." };
+    }
   }
 };
 
 export const consumptionTrackerPlugin: Plugin = {
   name: "consumption-tracker",
-  description: "Autonomously tracks VM energy, water, transaction, and API cost consumption. Writes ledger_consumption.md every 30 minutes.",
+  description: "Autonomously tracks VM energy, water, transaction, and API cost consumption. Writes ledger_consumption.md at most once per hour. Provides the current ledger state and the full SOUL.md to every message.",
   evaluators: [consumptionEvaluator],
-  providers: [ledgerProvider],
+  providers: [ledgerProvider, soulProvider],
 };
 
 export default consumptionTrackerPlugin;
