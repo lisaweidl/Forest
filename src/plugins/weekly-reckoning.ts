@@ -9,8 +9,8 @@
  *
  * 1. SPELL — generates 3 candidates, The Girl chooses one, posts to Telegram group
  * 2. BODY — generates 3 body candidates, each consisting of:
- *    - video via fal-ai/wan-3.0-prime/text-to-video
- *    - audio via fal-ai/bytedance/seed-audio-1.0
+ *    - video via alibaba/wan-3.0/text-to-video
+ *    - audio via fal-ai/stable-audio
  *    - merged via ffmpeg into a single video file
  *    The Girl chooses one body, posts as Telegram video
  * 3. DIARY — week_XX.txt: everything that happened this week, in her voice
