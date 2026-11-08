@@ -7,6 +7,7 @@ import { priceTrackerPlugin } from "./plugins/price-tracker";
 import { relationTrackerPlugin } from "./plugins/relation-tracker";
 import { jupiterTradingPlugin } from "./plugins/jupiter-trading";
 import { historyPlugin } from "./plugins/history";
+import { decisionCyclePlugin } from "./plugins/decision-cycle";
 import farcasterPlugin from "@elizaos/plugin-farcaster";
 
 export const character: Character = {
@@ -25,6 +26,7 @@ export const character: Character = {
     priceTrackerPlugin,
     relationTrackerPlugin,
     historyPlugin,
+    decisionCyclePlugin,
     farcasterPlugin,
   ],
   providers: [ledgerProvider],
