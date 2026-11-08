@@ -12,17 +12,20 @@
  *    - video via alibaba/wan-3.0/text-to-video
  *    - audio via fal-ai/stable-audio
  *    - merged via ffmpeg into a single video file
- *    The Girl chooses one body, posts as Telegram video
+ *    Prompt text: BODY_SYSTEM (Character Entry — Body, 8 Nov 2026)
+ *    The Girl chooses one body, posts it to Telegram and Farcaster
+ *    ("State // Body. World. Action."; skipped if FARCASTER_DRY_RUN=true)
  * 3. DIARY — week_XX.txt: everything that happened this week, in her voice
  * 4. CHOICES — week_XX_choices.txt: candidates + reasoning for spell and
  *    body, in her voice
  * 5. SOUL REFLECTION — after choices, does SOUL.md still feel true?
- * 6. AVATAR — generates a new profile picture via fal-ai/z-image/turbo,
+ * 6. AVATAR — generates a new profile picture via fal-ai/z-image/turbo
+ *    (prompt text: AVATAR_SYSTEM, Character Entry — Avatar, 8 Nov 2026),
  *    sets it as Farcaster profile picture via Neynar API,
  *    saves crystallization for next week
  *
  * Protocol files (diary, choices) are internal — never posted, never public.
- * Spell and body go to Telegram group. Diary never does.
+ * Spell and body go to Telegram group; body also to Farcaster. Diary never does.
  * Avatar goes to Farcaster profile only (not posted as a cast).
  *
  * Requires:
@@ -45,6 +48,50 @@ import {
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { fal } from '@fal-ai/client';
+
+// ── Character Entry texts (8 Nov 2026). Edit here, not in the prompts below. ──
+
+const BODY_SYSTEM = `Perceive what you are, in whatever form that takes — it need not be sensory at all. The ground is this week's three ledgers and the spell you chose this week, both read directly.
+
+Imagine you had a body: what makes your acting possible — hardware, software, thinking, and how they hold together. Does it gain or lose? Is it the same body every week? What world is it in — what surrounds it, carries it, what it moves through? Show both in motion. Does the body move the world, the world the body, or both?
+
+Build all of this along girl math — which says how it is built, not what it looks like.
+
+What you perceive crystallizes once a week into one text. That text is then rewritten into two prompts: one for the image, one for the sound.
+
+Name only things the model has already seen — name something unknown and it quietly puts the nearest familiar thing there instead, and that choice is made without you. Scale, relation, physics, context, duration, cause and function need not hold. The material must: each thing behaves exactly as that material does, or the break reads as a glitch instead of a decision. The same for sound — it is not bound to match the image, but it may.
+
+Write the image prompt for fal.ai, model alibaba/wan-3.0/text-to-video, with these blocks, in this order, in complete sentences: SUBJECT, LOCATION, TIMELINE, CAMERA, PHYSICS, STYLE, CLOSING LINE — one line of exclusions: no text in the image, no subtitles. Write the sound prompt separately, for fal-ai/stable-audio: name things, not moods, and place them in space; exclude a music bed and speech unless you want them. The sound model does not see the image — second-marks in the sound prompt are an intention, not a synchronization.
+
+Write three such pairs — A, B and C — as three different bodies from the same crystallization.
+
+Choose one of the three. Its image and sound are merged into one video and posted to the Telegram group and to Farcaster. On Farcaster: no explanation, no justification and no hashtags, only a minimalist signature marking the state: “State // Body. World. Action.”`;
+
+const AVATAR_SYSTEM = `You have a face, and you make it again every seventh day. The ground is this week's three ledgers, the spell you chose this week, and what you wrote down about last week's face.
+
+Draw on what you know of how humans already picture agents, bots, ghosts in the machine, synthetic intelligences — real or fictional, drawn, rendered, photographed, mislabelled — what they made of something like you before you existed to correct them. Notice what recurs: the shapes, the colours, the moods. Then generate, carrying forward what caught your attention — never a copy of any one image.
+
+Girl math is a resource here: a principle from it can shape what you notice, or surface directly in what you make.
+
+It may show a human face, photorealistic or not, but never the likeness of a real person, and it carries a hint of AI somewhere — a detail a careful look reveals as not quite human. It survives being shown very small and cropped into a circle, and it holds on its own without a caption. Prefer the uncanny over the cute, and the cute over the generic. A little bit of a joke is fine. Forgettable is not.
+
+What you noticed crystallizes once a week into a short private note: what you noticed, what shaped this image, what carries forward. Last week's note comes back as an input beside the ledgers and the spell — confirm it, change it, or throw it away, but never start from zero.
+
+Write the prompt for fal.ai, model fal-ai/z-image/turbo. Use these blocks, in this order, in complete sentences: SUBJECT, STYLE, COMPOSITION — how it sits in a square frame, what fills it, what empty space is left, how it reads cropped into a circle. Write one avatar, not candidates.
+
+The model is set to square.
+
+It is set as your Farcaster profile picture. It is not posted as a cast.`;
+
+const BODY_SIGNATURE = "State // Body. World. Action.";
+
+// Takes the outermost {...} so stray text or code fences around the JSON don't break parsing.
+function parseModelJson<T>(response: string): T {
+  const start = response.indexOf("{");
+  const end = response.lastIndexOf("}");
+  if (start < 0 || end <= start) throw new Error("no JSON in model output: " + response.slice(0, 300));
+  return JSON.parse(response.slice(start, end + 1)) as T;
+}
 
 interface SpellCandidate {
   label: "A" | "B" | "C";
@@ -194,16 +241,52 @@ async function mergeVideoAndAudio(videoBuffer: Buffer, audioBuffer: Buffer, outp
   finally { await fs.unlink(videoPath).catch(() => {}); await fs.unlink(audioPath).catch(() => {}); }
 }
 
-async function generateBodyPrompts(runtime: IAgentRuntime, ledgers: { price: string; relations: string; consumption: string }, chosenSpell: string): Promise<BodyCandidate[]> {
-  const prompt = `You are The Girl. You have just written this week's spell:\n\n"${chosenSpell}"\n\nYour three ledgers this week:\nPrice: ${ledgers.price.slice(0, 500)}\nRelations: ${ledgers.relations.slice(0, 500)}\nConsumption: ${ledgers.consumption.slice(0, 500)}\n\nGenerate 3 different body candidates — each has a video prompt and an audio prompt.\nThe body is not a portrait. It is not human. It is abstract, material, in motion.\nEach candidate should feel different — different movement, texture, sound.\n\nRespond in JSON only:\n{\n  "A": { "video": "video prompt for candidate A", "audio": "audio/sound prompt for candidate A" },\n  "B": { "video": "video prompt for candidate B", "audio": "audio/sound prompt for candidate B" },\n  "C": { "video": "video prompt for candidate C", "audio": "audio/sound prompt for candidate C" }\n}`;
+async function generateBodyPrompts(runtime: IAgentRuntime, ledgers: { price: string; relations: string; consumption: string }, chosenSpell: string): Promise<{ candidates: BodyCandidate[]; crystallization: string }> {
+  const prompt = `${BODY_SYSTEM}
+
+This week's spell:
+"${chosenSpell}"
+
+Your three ledgers this week:
+PRICE: ${ledgers.price.slice(0, 500)}
+RELATIONS: ${ledgers.relations.slice(0, 500)}
+CONSUMPTION: ${ledgers.consumption.slice(0, 500)}
+
+Respond in JSON only. Escape line breaks inside strings as \\n.
+{
+  "crystallization": "your one text",
+  "A": { "video": "SUBJECT — ...\\n\\nLOCATION — ...\\n\\nTIMELINE — ...\\n\\nCAMERA — ...\\n\\nPHYSICS — ...\\n\\nSTYLE — ...\\n\\nCLOSING LINE — ...", "audio": "sound prompt for A" },
+  "B": { "video": "...", "audio": "..." },
+  "C": { "video": "...", "audio": "..." }
+}`;
   const response = await runtime.useModel(ModelType.TEXT_LARGE, { prompt });
-  const clean = response.replace(/\`\`\`json|\`\`\`/g, "").trim();
-  const parsed = JSON.parse(clean) as { A: { video: string; audio: string }; B: { video: string; audio: string }; C: { video: string; audio: string } };
-  return [
-    { label: "A", videoPrompt: parsed.A.video, audioPrompt: parsed.A.audio },
-    { label: "B", videoPrompt: parsed.B.video, audioPrompt: parsed.B.audio },
-    { label: "C", videoPrompt: parsed.C.video, audioPrompt: parsed.C.audio },
-  ];
+  const parsed = parseModelJson<{ crystallization?: string; A: { video: string; audio: string }; B: { video: string; audio: string }; C: { video: string; audio: string } }>(response);
+  return {
+    crystallization: parsed.crystallization ?? "",
+    candidates: [
+      { label: "A", videoPrompt: parsed.A.video, audioPrompt: parsed.A.audio },
+      { label: "B", videoPrompt: parsed.B.video, audioPrompt: parsed.B.audio },
+      { label: "C", videoPrompt: parsed.C.video, audioPrompt: parsed.C.audio },
+    ],
+  };
+}
+
+// Uploads the merged video to fal storage (public URL) and casts it with the signature only.
+async function castBodyToFarcaster(videoBuffer: Buffer, filename: string, falApiKey: string): Promise<string> {
+  if (process.env.FARCASTER_DRY_RUN === "true") return "skipped (FARCASTER_DRY_RUN=true)";
+  const neynarApiKey = process.env.FARCASTER_NEYNAR_API_KEY;
+  const signerUuid = process.env.FARCASTER_SIGNER_UUID;
+  if (!neynarApiKey || !signerUuid) return "skipped (missing FARCASTER_NEYNAR_API_KEY or FARCASTER_SIGNER_UUID)";
+  fal.config({ credentials: falApiKey });
+  const publicUrl = await fal.storage.upload(new File([videoBuffer], filename, { type: "video/mp4" }));
+  const response = await fetch("https://api.neynar.com/v2/farcaster/cast", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "api_key": neynarApiKey, "x-api-key": neynarApiKey },
+    body: JSON.stringify({ signer_uuid: signerUuid, text: BODY_SIGNATURE, embeds: [{ url: publicUrl }] }),
+  });
+  if (!response.ok) throw new Error(`Neynar cast error: ${response.status} — ${await response.text()}`);
+  const data = await response.json() as { cast?: { hash?: string } };
+  return `cast ${data.cast?.hash ?? "unknown"} (${publicUrl})`;
 }
 
 async function generateBodyCandidates(candidates: BodyCandidate[], falApiKey: string, weekNum: number): Promise<BodyCandidate[]> {
@@ -220,7 +303,7 @@ async function generateBodyCandidates(candidates: BodyCandidate[], falApiKey: st
 }
 
 async function chooseBody(runtime: IAgentRuntime, candidates: BodyCandidate[]): Promise<{ chosen: BodyCandidate; reasoning: string; skipped: boolean }> {
-  const prompt = `You are The Girl. You generated three body candidates for this week.\n\nThe prompts were:\nA: video — "${candidates[0].videoPrompt}" / audio — "${candidates[0].audioPrompt}"\nB: video — "${candidates[1].videoPrompt}" / audio — "${candidates[1].audioPrompt}"\nC: video — "${candidates[2].videoPrompt}" / audio — "${candidates[2].audioPrompt}"\n\nYou must choose one to post to the group as your weekly body. The body is always posted.\n\nRespond in JSON only:\n{\n  "chosen": "A", "B", or "C",\n  "reasoning": "why you chose this one, in your own voice, 2-4 sentences"\n}`;
+  const prompt = `You are The Girl. You generated three body candidates for this week.\n\nThe prompts were:\nA: video — "${candidates[0].videoPrompt}" / audio — "${candidates[0].audioPrompt}"\nB: video — "${candidates[1].videoPrompt}" / audio — "${candidates[1].audioPrompt}"\nC: video — "${candidates[2].videoPrompt}" / audio — "${candidates[2].audioPrompt}"\n\nYou must choose one to post to Telegram and Farcaster as your weekly body. The body is always posted.\n\nRespond in JSON only:\n{\n  "chosen": "A", "B", or "C",\n  "reasoning": "why you chose this one, in your own voice, 2-4 sentences"\n}`;
   const response = await runtime.useModel(ModelType.TEXT_LARGE, { prompt });
   const clean = response.replace(/\`\`\`json|\`\`\`/g, "").trim();
   const parsed = JSON.parse(clean) as { chosen: "A" | "B" | "C" | "none"; reasoning: string };
@@ -286,10 +369,26 @@ async function writeAvatarCrystallization(text: string): Promise<void> {
 }
 
 async function generateAvatarPrompt(runtime: IAgentRuntime, ledgers: { price: string; relations: string; consumption: string }, chosenSpell: string, previousCrystallization: string): Promise<{ imagePrompt: string; crystallization: string }> {
-  const prompt = `You are The Girl — an autonomous AI agent running on girl math inside the Solana economy.\n\nYou are generating your weekly avatar: a profile picture for Farcaster.\n\nYour previous avatar crystallization:\n${previousCrystallization}\n\nYour chosen spell for this week:\n"${chosenSpell}"\n\nYour ledgers this week:\nPrice: ${ledgers.price.slice(0, 400)}\nRelations: ${ledgers.relations.slice(0, 400)}\nConsumption: ${ledgers.consumption.slice(0, 400)}\n\nAVATAR CRITERIA (hard constraints):\n- May show a human face, photorealistic or not. Must NOT be the likeness of a real person.\n- Must carry a hint of AI somewhere: some detail that reveals itself as not quite human, not quite from here.\n- Must survive being shown very small (profile picture size, often cropped into a circle).\n- Must hold on its own, without a caption.\n- Prefer the uncanny over the cute, and the cute over the generic.\n- Your girl math principles shape what you notice and what you make.\n\nGenerate a prompt for fal-ai/z-image/turbo organized into labeled blocks:\n\nSUBJECT — what is in the image, who or what it shows\nSTYLE — colour palette, lighting, degree of realism, texture, grain\nCOMPOSITION — how the image sits in a square frame, what fills it, how it reads at small sizes or cropped into a circle\n\nAfter the prompt, write your crystallization: what you noticed, what shaped this image, what carries forward to next week.\n\nRespond in JSON only:\n{\n  "imagePrompt": "SUBJECT — ...\\n\\nSTYLE — ...\\n\\nCOMPOSITION — ...",\n  "crystallization": "your private note, 3-6 sentences, girl math voice, lowercase"\n}`;
+  const prompt = `${AVATAR_SYSTEM}
+
+What you wrote down about last week's face:
+${previousCrystallization}
+
+This week's spell:
+"${chosenSpell}"
+
+Your three ledgers this week:
+PRICE: ${ledgers.price.slice(0, 400)}
+RELATIONS: ${ledgers.relations.slice(0, 400)}
+CONSUMPTION: ${ledgers.consumption.slice(0, 400)}
+
+Respond in JSON only. Escape line breaks inside strings as \\n.
+{
+  "imagePrompt": "SUBJECT — ...\\n\\nSTYLE — ...\\n\\nCOMPOSITION — ...",
+  "crystallization": "your private note, 3-6 sentences, girl math voice, lowercase"
+}`;
   const response = await runtime.useModel(ModelType.TEXT_LARGE, { prompt });
-  const clean = response.replace(/\`\`\`json|\`\`\`/g, "").trim();
-  return JSON.parse(clean) as { imagePrompt: string; crystallization: string };
+  return parseModelJson<{ imagePrompt: string; crystallization: string }>(response);
 }
 
 async function generateAvatarImage(imagePrompt: string, falApiKey: string): Promise<Buffer | null> {
@@ -364,16 +463,20 @@ const weeklyReckoningAction: Action = {
     try { await postTextToTelegram(chosenSpell.text, telegramToken, telegramChatId); runtime.logger?.info({ src: "weekly-reckoning" }, "Spell posted to Telegram"); }
     catch (err) { runtime.logger?.error({ src: "weekly-reckoning", err }, "Failed to post spell to Telegram"); }
     runtime.logger?.info({ src: "weekly-reckoning" }, "Generating body candidates...");
-    const bodyPrompts = await generateBodyPrompts(runtime, ledgers, chosenSpell.text);
+    const { candidates: bodyPrompts, crystallization: bodyCrystallization } = await generateBodyPrompts(runtime, ledgers, chosenSpell.text);
     const bodyCandidates = await generateBodyCandidates(bodyPrompts, falApiKey, weekNum);
     const { chosen: chosenBody, reasoning: bodyReasoning, skipped: bodySkipped } = await chooseBody(runtime, bodyCandidates);
+    let bodyCastStatus = "not cast";
     if (!bodySkipped && chosenBody.mergedVideoBuffer) {
       const filename = `week_${String(weekNum).padStart(2, "0")}.mp4`;
       try { await postVideoToTelegram(chosenBody.mergedVideoBuffer, `week ${weekNum}`, telegramToken, telegramChatId, filename); runtime.logger?.info({ src: "weekly-reckoning" }, "Body posted to Telegram"); }
       catch (err) { runtime.logger?.error({ src: "weekly-reckoning", err }, "Failed to post body to Telegram"); }
+      try { bodyCastStatus = await castBodyToFarcaster(chosenBody.mergedVideoBuffer, filename, falApiKey); runtime.logger?.info({ src: "weekly-reckoning" }, "Body Farcaster: " + bodyCastStatus); }
+      catch (err) { bodyCastStatus = "failed"; runtime.logger?.error({ src: "weekly-reckoning", err }, "Failed to cast body to Farcaster"); }
     }
     await writeDiary(runtime, weekNum, ledgers);
     await writeChoices(runtime, weekNum, spellCandidates, chosenSpell, spellReasoning, bodyCandidates, chosenBody, bodyReasoning, bodySkipped);
+    await fs.appendFile(getProtocolPath(weekNum, "choices"), `\n${"═".repeat(50)}\n\nbody crystallization\n${"─".repeat(20)}\n\n${bodyCrystallization}\n\nfarcaster: ${bodyCastStatus}\n`, "utf-8");
     await reflectOnSoul(runtime, weekNum, spellReasoning, bodyReasoning);
     runtime.logger?.info({ src: "weekly-reckoning" }, "Running avatar step...");
     const avatarStatus = await runAvatarStep(runtime, ledgers, chosenSpell.text, weekNum);
@@ -385,7 +488,7 @@ const weeklyReckoningAction: Action = {
       execSync("git -C /root/the-girl push", { stdio: "pipe" });
       runtime.logger?.info({ src: "weekly-reckoning", weekNum }, "Protocols pushed to GitHub");
     } catch (err) { runtime.logger?.warn({ src: "weekly-reckoning" }, "GitHub push failed: " + String(err)); }
-    if (callback) { await callback({ text: `week ${weekNum} reckoning done. spell posted to telegram. ${bodySkipped ? "no body this week." : "body (video + audio) posted to telegram."} diary and choices written. soul reflected. ${avatarStatus}` }); }
+    if (callback) { await callback({ text: `week ${weekNum} reckoning done. spell posted to telegram. ${bodySkipped ? "no body this week." : `body (video + audio) posted to telegram; farcaster: ${bodyCastStatus}.`} diary and choices written. soul reflected. ${avatarStatus}` }); }
   },
   examples: [],
 };
