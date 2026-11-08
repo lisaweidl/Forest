@@ -1,6 +1,5 @@
 import type { Character } from "@elizaos/core";
 import { ledgerWriterPlugin } from "./plugins/ledger-writer";
-import { soulWriterPlugin } from "./plugins/soul-writer";
 import { weeklyReckoningPlugin } from "./plugins/weekly-reckoning";
 import { consumptionTrackerPlugin, ledgerProvider } from "./plugins/consumption-tracker";
 import { priceTrackerPlugin } from "./plugins/price-tracker";
@@ -19,7 +18,6 @@ export const character: Character = {
     "@elizaos/plugin-ollama",
     "@elizaos/plugin-telegram",
     ledgerWriterPlugin,
-    soulWriterPlugin,
     weeklyReckoningPlugin,
     jupiterTradingPlugin,
     consumptionTrackerPlugin,
