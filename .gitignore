@@ -1,0 +1,8 @@
+.env
+.eliza/
+node_modules/
+*.bak
+.env
+.eliza/
+node_modules/
+*.bak
