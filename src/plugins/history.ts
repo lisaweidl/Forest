@@ -176,7 +176,8 @@ async function latestDecisionLine(): Promise<string | null> {
     const a = e.decision.action;
     const isMove = ["buy", "sell", "dissipate"].includes(a);
     const amt = e.outcome === "executed" ? e.decision.executed_amount_usdc : (e.decision.allowed_amount_usdc ?? e.decision.amount_usdc);
-    const what = a === "buy" ? `buy ${amt} usdc → sol` : a === "sell" ? `sell ${amt} usdc of sol` : a === "dissipate" ? `give ${amt} usdc to wewilder` : a;
+    const tok = String(e.decision.token ?? "sol").toLowerCase();
+    const what = a === "buy" ? `buy ${amt} usdc → ${tok}` : a === "sell" ? `sell ${amt} usdc of ${tok}` : a === "dissipate" ? `give ${amt} usdc to wewilder` : a;
     const how = e.outcome === "executed" ? "done"
       : e.outcome === "reverted" ? "failed"
       : isMove && Number(amt) < 0.5 ? "not executed"
