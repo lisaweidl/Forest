@@ -56,6 +56,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { fal } from '@fal-ai/client';
 import { generateWeeklySummary, recentLedgerText, readWeeklySummaries } from "./history";
+import { recordGeneration } from "./consumption-tracker";
 
 // ── Character Entry texts (8 Nov 2026). Edit here, not in the prompts below. ──
 
@@ -382,8 +383,10 @@ async function generateBodyCandidates(candidates: BodyCandidate[], falApiKey: st
   const results = await Promise.all(candidates.map(async (candidate) => {
     const video = await generateBodyVideo(candidate.videoPrompt, falApiKey);
     if (!video) return candidate;
+    recordGeneration("video");
     const audio = await generateBodyAudio(candidate.audioPrompt, falApiKey);
     if (!audio) return { ...candidate, videoUrl: video.url };
+    recordGeneration("audio");
     const outputPath = path.join(process.cwd(), "protocols", `body_week${String(weekNum).padStart(2,"0")}_${candidate.label}.mp4`);
     const merged = await mergeVideoAndAudio(video.buffer, audio.buffer, outputPath);
     return { ...candidate, videoUrl: video.url, audioUrl: audio.url, mergedVideoBuffer: merged ?? undefined };
@@ -610,6 +613,7 @@ async function runAvatarStep(runtime: IAgentRuntime, ledgers: { price: string; r
   catch (err) { runtime.logger?.error({ src: "weekly-reckoning" }, "Avatar prompt generation failed: " + String(err)); return "avatar skipped (prompt generation failed)."; }
   const imageBuffer = await generateAvatarImage(imagePrompt, falApiKey);
   if (!imageBuffer) { runtime.logger?.error({ src: "weekly-reckoning" }, "Avatar image generation failed"); return "avatar skipped (image generation failed)."; }
+  recordGeneration("image");
   const avatarPath = path.join(process.cwd(), "protocols", `avatar_week${String(weekNum).padStart(2, "0")}.jpg`);
   await fs.writeFile(avatarPath, imageBuffer);
   const success = await uploadAndSetFarcasterAvatar(imageBuffer, neynarApiKey, neynarSignerUuid);

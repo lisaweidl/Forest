@@ -269,7 +269,8 @@ async function buildWeekNumbers(): Promise<string> {
     rel.length ? `responses ${sum(5)} · refusals ${sum(3)} · gifts ${sum(4)}${rel[0].time > since + DAY_MS ? " (counted since 8 nov)" : ""}` : "no reliable rows yet",
     "",
     "consumption (since project start)",
-    c ? `${c.cells[4]} kwh · ${c.cells[5]} l water · vm €${c.cells[6]} · api €${c.cells[7]} (estimated)` : "no data",
+    c ? `server: ${c.cells[4]} kwh · ${c.cells[5]} l water · vm €${c.cells[6]} · api €${c.cells[7]} (estimated)` : "no data",
+    c && c.cells[8] && c.cells[8] !== "—" ? `ai calls (claude + fal, other data centres, since 13 nov, estimated): ${c.cells[8]} kwh · ${c.cells[9]} l water` : "ai calls: not counted yet",
   ].join("\n");
 }
 
