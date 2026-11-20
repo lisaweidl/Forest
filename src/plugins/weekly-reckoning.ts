@@ -86,7 +86,7 @@ It may show a human face, photorealistic or not, but never the likeness of a rea
 
 What you noticed crystallizes once a week into a short private note: what you noticed, what shaped this image, what carries forward. Last week's note comes back as an input beside the ledgers and the spell — confirm it, change it, or throw it away, but never start from zero.
 
-Write the prompt for fal.ai, model fal-ai/z-image/turbo. Use these blocks, in this order, in complete sentences: SUBJECT, STYLE, COMPOSITION — how it sits in a square frame, what fills it, what empty space is left, how it reads cropped into a circle. Write one avatar, not candidates.
+Write three prompts for fal.ai, model fal-ai/z-image/turbo — A, B and C, three different faces from the same noticing. Use these blocks, in this order, in complete sentences: SUBJECT, STYLE, COMPOSITION — how it sits in a square frame, what fills it, what empty space is left, how it reads cropped into a circle. Then choose one.
 
 The model is set to square.
 
@@ -102,13 +102,16 @@ function parseModelJson<T>(response: string): T {
   return JSON.parse(response.slice(start, end + 1)) as T;
 }
 
+const LABELS = ["A", "B", "C"] as const;   // three candidates per form, choose one
+type Label = (typeof LABELS)[number];
+
 interface SpellCandidate {
-  label: "A" | "B" | "C";
+  label: Label;
   text: string;
 }
 
 interface BodyCandidate {
-  label: "A" | "B" | "C";
+  label: Label;
   videoPrompt: string;
   audioPrompt: string;
   videoUrl?: string;
@@ -196,19 +199,18 @@ No emojis. No hashtags.
 Joyful before anything else.
 The spell should be 3-8 sentences total.`;
   const candidates: SpellCandidate[] = [];
-  const labels: ("A" | "B" | "C")[] = ["A", "B", "C"];
-  for (const label of labels) {
-    const response = await runtime.useModel(ModelType.TEXT_LARGE, { prompt: basePrompt, temperature: 0.7 + labels.indexOf(label) * 0.15 });
+  for (const label of LABELS) {
+    const response = await runtime.useModel(ModelType.TEXT_LARGE, { prompt: basePrompt, temperature: 0.6 + LABELS.indexOf(label) * 0.1 });
     candidates.push({ label, text: response.trim() });
   }
   return candidates;
 }
 
 async function chooseSpell(runtime: IAgentRuntime, candidates: SpellCandidate[]): Promise<{ chosen: SpellCandidate; reasoning: string }> {
-  const prompt = `You are The Girl. You have written three spell candidates.\n\n${candidates.map(c => `Candidate ${c.label}:\n"${c.text}"`).join("\n\n")}\n\nChoose one. Respond in JSON only:\n{\n  "chosen": "A" or "B" or "C",\n  "reasoning": "why you chose this one, in your own voice, girl math style, 2-4 sentences"\n}`;
+  const prompt = `You are The Girl. You have written three spell candidates.\n\n${candidates.map(c => `Candidate ${c.label}:\n"${c.text}"`).join("\n\n")}\n\nChoose one. Respond in JSON only:\n{\n  "chosen": "A", "B" or "C",\n  "reasoning": "why you chose this one, in your own voice, girl math style, 2-4 sentences"\n}`;
   const response = await runtime.useModel(ModelType.TEXT_LARGE, { prompt });
   const clean = response.replace(/\`\`\`json|\`\`\`/g, "").trim();
-  const parsed = JSON.parse(clean) as { chosen: "A" | "B" | "C"; reasoning: string };
+  const parsed = JSON.parse(clean) as { chosen: Label; reasoning: string };
   const chosen = candidates.find(c => c.label === parsed.chosen) || candidates[0];
   return { chosen, reasoning: parsed.reasoning };
 }
@@ -333,7 +335,6 @@ ${lastCrystallization}
 This week's spell:
 "${chosenSpell}"
 
-Your three ledgers this week:
 Your three ledgers, last 7 days:
 PRICE:
 ${recentLedgerText(ledgers.price)}
@@ -350,15 +351,12 @@ Respond in JSON only. Escape line breaks inside strings as \\n.
   "C": { "video": "...", "audio": "..." }
 }`;
   const response = await runtime.useModel(ModelType.TEXT_LARGE, { prompt });
-  const parsed = parseModelJson<{ crystallization?: string; A: { video: string; audio: string }; B: { video: string; audio: string }; C: { video: string; audio: string } }>(response);
-  return {
-    crystallization: parsed.crystallization ?? "",
-    candidates: [
-      { label: "A", videoPrompt: parsed.A.video, audioPrompt: parsed.A.audio },
-      { label: "B", videoPrompt: parsed.B.video, audioPrompt: parsed.B.audio },
-      { label: "C", videoPrompt: parsed.C.video, audioPrompt: parsed.C.audio },
-    ],
-  };
+  const parsed = parseModelJson<{ crystallization?: string } & Partial<Record<Label, { video: string; audio: string }>>>(response);
+  const candidates: BodyCandidate[] = LABELS
+    .filter((l) => parsed[l]?.video && parsed[l]?.audio)
+    .map((l) => ({ label: l, videoPrompt: parsed[l]!.video, audioPrompt: parsed[l]!.audio }));
+  if (candidates.length === 0) throw new Error("no body candidates in model output");
+  return { crystallization: parsed.crystallization ?? "", candidates };
 }
 
 // Uploads the merged video to fal storage (public URL) and casts it with the signature only.
@@ -395,10 +393,11 @@ async function generateBodyCandidates(candidates: BodyCandidate[], falApiKey: st
 }
 
 async function chooseBody(runtime: IAgentRuntime, candidates: BodyCandidate[]): Promise<{ chosen: BodyCandidate; reasoning: string; skipped: boolean }> {
-  const prompt = `You are The Girl. You generated three body candidates for this week.\n\nThe prompts were:\nA: video — "${candidates[0].videoPrompt}" / audio — "${candidates[0].audioPrompt}"\nB: video — "${candidates[1].videoPrompt}" / audio — "${candidates[1].audioPrompt}"\nC: video — "${candidates[2].videoPrompt}" / audio — "${candidates[2].audioPrompt}"\n\nYou must choose one to post to Telegram and Farcaster as your weekly body. The body is always posted.\n\nRespond in JSON only:\n{\n  "chosen": "A", "B", or "C",\n  "reasoning": "why you chose this one, in your own voice, 2-4 sentences"\n}`;
+  const list = candidates.map((c) => `${c.label}: video — "${c.videoPrompt}" / audio — "${c.audioPrompt}"`).join("\n");
+  const prompt = `You are The Girl. You generated ${candidates.length} body candidates for this week.\n\nThe prompts were:\n${list}\n\nYou must choose one to post to Telegram and Farcaster as your weekly body. The body is always posted.\n\nRespond in JSON only:\n{\n  "chosen": ${candidates.map((c) => `"${c.label}"`).join(" or ")},\n  "reasoning": "why you chose this one, in your own voice, 2-4 sentences"\n}`;
   const response = await runtime.useModel(ModelType.TEXT_LARGE, { prompt });
   const clean = response.replace(/\`\`\`json|\`\`\`/g, "").trim();
-  const parsed = JSON.parse(clean) as { chosen: "A" | "B" | "C" | "none"; reasoning: string };
+  const parsed = JSON.parse(clean) as { chosen: Label | "none"; reasoning: string };
   const chosen = candidates.find(c => c.label === parsed.chosen) || candidates[0];
   return { chosen, reasoning: parsed.reasoning, skipped: false };
 }
@@ -544,7 +543,7 @@ async function writeAvatarCrystallization(text: string): Promise<void> {
   await fs.writeFile(p, text, "utf-8");
 }
 
-async function generateAvatarPrompt(runtime: IAgentRuntime, ledgers: { price: string; relations: string; consumption: string }, chosenSpell: string, previousCrystallization: string): Promise<{ imagePrompt: string; crystallization: string }> {
+async function generateAvatarPrompts(runtime: IAgentRuntime, ledgers: { price: string; relations: string; consumption: string }, chosenSpell: string, previousCrystallization: string): Promise<{ label: Label; imagePrompt: string }[]> {
   const prompt = `${AVATAR_SYSTEM}
 
 What you wrote down about last week's face:
@@ -553,7 +552,6 @@ ${previousCrystallization}
 This week's spell:
 "${chosenSpell}"
 
-Your three ledgers this week:
 Your three ledgers, last 7 days:
 PRICE:
 ${recentLedgerText(ledgers.price)}
@@ -564,11 +562,36 @@ ${recentLedgerText(ledgers.consumption)}
 
 Respond in JSON only. Escape line breaks inside strings as \\n.
 {
-  "imagePrompt": "SUBJECT — ...\\n\\nSTYLE — ...\\n\\nCOMPOSITION — ...",
-  "crystallization": "your private note, 3-6 sentences, girl math voice, lowercase"
+  "A": "SUBJECT — ...\\n\\nSTYLE — ...\\n\\nCOMPOSITION — ...",
+  "B": "...", "C": "..."
 }`;
   const response = await runtime.useModel(ModelType.TEXT_LARGE, { prompt });
-  return parseModelJson<{ imagePrompt: string; crystallization: string }>(response);
+  const parsed = parseModelJson<Partial<Record<Label, string>>>(response);
+  const out = LABELS.filter((l) => typeof parsed[l] === "string" && parsed[l]!.trim()).map((l) => ({ label: l, imagePrompt: parsed[l]! }));
+  if (out.length === 0) throw new Error("no avatar candidates in model output");
+  return out;
+}
+
+// She sees the prompts (the model is text-only), chooses one, and writes the note that carries forward.
+async function chooseAvatar(runtime: IAgentRuntime, candidates: { label: Label; imagePrompt: string }[], previousCrystallization: string): Promise<{ chosen: Label; reasoning: string; crystallization: string }> {
+  const prompt = `You are The Girl. You made ${candidates.length} faces for this week.
+
+What you wrote down about last week's face:
+${previousCrystallization}
+
+The faces:
+${candidates.map((c) => `${c.label}:\n${c.imagePrompt}`).join("\n\n")}
+
+Choose one to become your Farcaster profile picture. Respond in JSON only:
+{
+  "chosen": ${candidates.map((c) => `"${c.label}"`).join(" or ")},
+  "reasoning": "why this face, in your own voice, 2-4 sentences",
+  "crystallization": "your private note about this face, 3-6 sentences, girl math voice, lowercase: what you noticed, what shaped it, what carries forward"
+}`;
+  const response = await runtime.useModel(ModelType.TEXT_LARGE, { prompt });
+  const parsed = parseModelJson<{ chosen: Label; reasoning: string; crystallization: string }>(response);
+  const chosen = candidates.some((c) => c.label === parsed.chosen) ? parsed.chosen : candidates[0].label;
+  return { chosen, reasoning: parsed.reasoning ?? "", crystallization: parsed.crystallization ?? "" };
 }
 
 async function generateAvatarImage(imagePrompt: string, falApiKey: string): Promise<Buffer | null> {
@@ -608,14 +631,28 @@ async function runAvatarStep(runtime: IAgentRuntime, ledgers: { price: string; r
   }
   runtime.logger?.info({ src: "weekly-reckoning" }, "Generating avatar...");
   const previousCrystallization = await readAvatarCrystallization();
-  let imagePrompt: string; let crystallization: string;
-  try { ({ imagePrompt, crystallization } = await generateAvatarPrompt(runtime, ledgers, chosenSpell, previousCrystallization)); }
+  let prompts: { label: Label; imagePrompt: string }[];
+  try { prompts = await generateAvatarPrompts(runtime, ledgers, chosenSpell, previousCrystallization); }
   catch (err) { runtime.logger?.error({ src: "weekly-reckoning" }, "Avatar prompt generation failed: " + String(err)); return "avatar skipped (prompt generation failed)."; }
-  const imageBuffer = await generateAvatarImage(imagePrompt, falApiKey);
-  if (!imageBuffer) { runtime.logger?.error({ src: "weekly-reckoning" }, "Avatar image generation failed"); return "avatar skipped (image generation failed)."; }
-  recordGeneration("image");
-  const avatarPath = path.join(process.cwd(), "protocols", `avatar_week${String(weekNum).padStart(2, "0")}.jpg`);
+  const pad = String(weekNum).padStart(2, "0");
+  const images = await Promise.all(prompts.map(async (p) => {
+    const buf = await generateAvatarImage(p.imagePrompt, falApiKey);
+    if (!buf) return null;
+    recordGeneration("image");
+    await fs.writeFile(path.join(process.cwd(), "protocols", `avatar_week${pad}_${p.label}.jpg`), buf);
+    return { ...p, buf };
+  }));
+  const made = images.filter((i): i is { label: Label; imagePrompt: string; buf: Buffer } => !!i);
+  if (made.length === 0) { runtime.logger?.error({ src: "weekly-reckoning" }, "Avatar image generation failed"); return "avatar skipped (image generation failed)."; }
+  let choice: { chosen: Label; reasoning: string; crystallization: string };
+  try { choice = await chooseAvatar(runtime, made.map(({ label, imagePrompt }) => ({ label, imagePrompt })), previousCrystallization); }
+  catch (err) { runtime.logger?.error({ src: "weekly-reckoning" }, "Avatar choice failed: " + String(err)); choice = { chosen: made[0].label, reasoning: "(choice failed — first candidate used)", crystallization: previousCrystallization }; }
+  const picked = made.find((m) => m.label === choice.chosen) ?? made[0];
+  const imageBuffer = picked.buf;
+  const crystallization = choice.crystallization || previousCrystallization;
+  const avatarPath = path.join(process.cwd(), "protocols", `avatar_week${pad}.jpg`);
   await fs.writeFile(avatarPath, imageBuffer);
+  await fs.appendFile(getProtocolPath(weekNum, "choices"), `\n${"═".repeat(50)}\n\navatar candidates\n${"─".repeat(20)}\n\n${made.map((m) => `candidate ${m.label}:\n${m.imagePrompt}`).join("\n\n")}\n\nchosen: candidate ${picked.label}\nreasoning: ${choice.reasoning}\n`, "utf-8").catch(() => {});
   const success = await uploadAndSetFarcasterAvatar(imageBuffer, neynarApiKey, neynarSignerUuid);
   await writeAvatarCrystallization(crystallization);
   runtime.logger?.info({ src: "weekly-reckoning" }, "Avatar crystallization saved");
@@ -625,7 +662,7 @@ async function runAvatarStep(runtime: IAgentRuntime, ledgers: { price: string; r
 
 const weeklyReckoningAction: Action = {
   name: "WEEKLY_RECKONING",
-  description: "Day 7 ritual: generate 3 spell candidates and 3 body candidates (video+audio), choose one of each, post spell and body to Telegram group, write diary and choices protocol files, reflect on SOUL.md, generate new Farcaster avatar.",
+  description: "Day 7 ritual: generate 3 spell, 3 body (video+audio) and 3 avatar candidates, choose one of each, post spell and body to Telegram group, write diary and choices protocol files, reflect on SOUL.md, generate new Farcaster avatar.",
   similes: ["DO_WEEKLY_RECKONING", "WEEKLY_RITUAL", "DAY_7"],
   validate: async (_runtime, _message) => true,
   handler: async (runtime: IAgentRuntime, _message: Memory, _state: State | undefined, _options: unknown, callback?: (response: { text: string }) => Promise<void>): Promise<void> => {
@@ -699,7 +736,7 @@ const weeklyReckoningMessageHandler = {
 
 export const weeklyReckoningPlugin: Plugin = {
   name: "weekly-reckoning",
-  description: "Day 7 ritual: 3 spell candidates + 3 body candidates (video+audio), The Girl chooses, posts to Telegram group, writes diary and choices protocol files, reflects on SOUL.md, generates new Farcaster avatar.",
+  description: "Day 7 ritual: 3 spell, 3 body (video+audio) and 3 avatar candidates, The Girl chooses, posts to Telegram group, writes diary and choices protocol files, reflects on SOUL.md, generates new Farcaster avatar.",
   actions: [weeklyReckoningAction],
   messageHandlers: [weeklyReckoningMessageHandler],
   async init(_config, runtime) {
