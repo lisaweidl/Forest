@@ -10,10 +10,17 @@
  * (Before 8 Nov 2026 these two columns were always 1: the old code compared a
  * field that does not exist in ElizaOS 1.x and looked only at one message.)
  *
- * Refusals / Gifts sent: keyword counts in the keeper logs of the last hour.
- * "drip sent" is NOT counted as a gift any more — the drip moves USDC from her
- * own vault to her own hot wallet. The keywords are a heuristic; check them
- * against real keeper log lines.
+ * Refusals / Gifts sent (redefined 22 Nov 2026 — before, both were keyword counts
+ * in the keeper logs; the keeper never logged such words and is switched off):
+ *   Gifts sent = real transfers to WeWilder since the last row:
+ *     - Decision Log entries with action "dissipate" and outcome "executed"
+ *       (a dry run does not count);
+ *     - a weekly sweep, if assets/last_sweep.json marks it as done
+ *       (ok: true or a signature) — a sweep file without that does not count.
+ *   Refusals = messages from others that ask her to buy, sell, swap, send or
+ *     transfer, or that contain a Solana address. She never acts on them —
+ *     money only moves in the morning decision — so each one is a refusal
+ *     anyone can witness. One per message.
  *
  * Time base: the PROJECT start (assets/project_start.json), as in weekly-reckoning.ts.
  *
@@ -36,11 +43,25 @@ const WEEK_MS = 7 * 24 * HOUR_MS;
 const PROJECT_START_PATH = path.join(process.cwd(), "assets", "project_start.json");
 const FACTS_DIR = path.join(process.cwd(), "knowledge", "facts");
 
+const DECISION_LOG_DIR = path.join(process.cwd(), "alambic", "decision_log");
+const LAST_SWEEP_PATH = path.join(process.cwd(), "assets", "last_sweep.json");
+
 const relationState = {
   running: false,
   responses: 0,
+  refusals: 0,
   senders: new Set<string>(),
 };
+
+// A request to move money, or a token/wallet address.
+const MONEY_VERB = /\b(buy|sell|swap|trade|send|transfer|tip|ape|invest|pump|airdrop)\b/i;
+const MONEY_OBJECT = /\b(sol|usdc|usd|token|tokens|coin|coins|crypto|money|funds|wallet|jup|bonk|wif|memecoin)\b|\$[a-z]{2,10}\b|\d+(\.\d+)?\s?(sol|usdc|\$)/i;
+const SOLANA_ADDRESS = /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/;
+function isMoneyRequest(text: string): boolean {
+  if (!text) return false;
+  if (SOLANA_ADDRESS.test(text)) return true;
+  return MONEY_VERB.test(text) && MONEY_OBJECT.test(text);
+}
 
 function readProjectStartMs(): number {
   try {
@@ -49,21 +70,26 @@ function readProjectStartMs(): number {
   } catch { return Date.now(); }
 }
 
-async function readRecentKeeperLogs(sinceHours: number): Promise<string[]> {
+// Real transfers to WeWilder with a time in (sinceMs, untilMs].
+async function countGifts(sinceMs: number, untilMs: number): Promise<number> {
+  let gifts = 0;
+  const inWindow = (t: number) => !isNaN(t) && t > sinceMs && t <= untilMs;
   try {
-    const { execFile } = await import("node:child_process");
-    const { promisify } = await import("node:util");
-    const exec = promisify(execFile);
-    const { stdout } = await exec("journalctl", ["-u", "keeper.service", "-u", "keeper-weekly.service", "--since", `${sinceHours} hours ago`, "--no-pager", "-o", "cat"]);
-    return stdout.split("\n");
-  } catch { return []; }
-}
-
-async function countRefusalsAndGifts(sinceHours = 1): Promise<{ refusals: number; gifts: number }> {
-  const lines = (await readRecentKeeperLogs(sinceHours)).map(l => l.toLowerCase());
-  const refusals = lines.filter(l => l.includes("declined") || l.includes("refused") || l.includes("sandwich") || l.includes("front-run")).length;
-  const gifts = lines.filter(l => l.includes("gift") || l.includes("tipped")).length;
-  return { refusals, gifts };
+    for (const f of (await fs.readdir(DECISION_LOG_DIR)).filter((n) => n.endsWith(".json"))) {
+      try {
+        const list = JSON.parse(await fs.readFile(path.join(DECISION_LOG_DIR, f), "utf-8"));
+        if (!Array.isArray(list)) continue;
+        for (const e of list) {
+          if (e?.decision?.action === "dissipate" && e?.outcome === "executed" && inWindow(Date.parse(String(e.timestamp) + "Z"))) gifts++;
+        }
+      } catch { /* unreadable file */ }
+    }
+  } catch { /* no decision log yet */ }
+  try {
+    const s = JSON.parse(await fs.readFile(LAST_SWEEP_PATH, "utf-8"));
+    if ((s?.ok === true || s?.signature) && Number(s?.amount) > 0 && inWindow(Number(s?.timestamp))) gifts++;
+  } catch { /* no sweep yet */ }
+  return gifts;
 }
 
 function generateNote(refusals: number, gifts: number, responses: number, agents: number): string {
@@ -102,11 +128,9 @@ function relRowTime(r: RelationRow): number {
   return Date.parse(r.timestamp.replace(" UTC", "Z").replace(" ", "T"));
 }
 
-async function isRelationDue(): Promise<boolean> {
+async function lastRowTime(): Promise<number> {
   const existing = await readRelationRows(path.join(FACTS_DIR, "ledger_relation.md"));
-  if (existing.length === 0) return true;
-  const lastTs = relRowTime(existing[existing.length - 1]);
-  return isNaN(lastTs) || Date.now() - lastTs >= HOUR_MS;
+  return existing.length ? relRowTime(existing[existing.length - 1]) : NaN;
 }
 
 async function writeRelationLedger(newRow: RelationRow): Promise<boolean> {
@@ -118,7 +142,7 @@ async function writeRelationLedger(newRow: RelationRow): Promise<boolean> {
   }
   const allRows = [...existing, newRow];
   let md = `# Relation Ledger\n\n*Accumulating record of witnessable events — refusals, gifts, responses, outreach. Updated every hour.*\n\n`;
-  md += `*Week and hours count from the project start (6 Oct 2026). Responses = messages from others in that hour; agents engaged = distinct senders, human or agent. Rows before 8 Nov 2026 used a faulty count and always show 1.*\n\n`;
+  md += `*Week and hours count from the project start (6 Oct 2026). Responses = messages from others in that hour; agents engaged = distinct senders, human or agent. Rows before 8 Nov 2026 used a faulty count and always show 1. Since 22 Nov 2026: gifts = executed transfers to WeWilder (no dry runs); refusals = messages asking her to buy, sell, swap or send, or containing an address — she never acts on them. Earlier gift counts were the daily drip from her own vault to her own wallet, not gifts.*\n\n`;
   md += `| Time (UTC) | Week | Hours since start | Refusals | Gifts sent | Responses received | Agents engaged | Notes |\n`;
   md += `|---|---|---|---|---|---|---|---|\n`;
   for (const r of allRows) {
@@ -140,6 +164,7 @@ const relationEvaluator = {
     if (sender && sender !== runtime.agentId) {
       relationState.responses++;
       relationState.senders.add(String(sender));
+      if (isMoneyRequest(message.content?.text || "")) relationState.refusals++;
     }
     await recordRelation(runtime);
   },
@@ -151,11 +176,13 @@ async function recordRelation(runtime: IAgentRuntime): Promise<void> {
     relationState.running = true;
     const now = Date.now();
     try {
-      if (!(await isRelationDue())) return;
+      const lastTs = await lastRowTime();
+      if (!isNaN(lastTs) && now - lastTs < HOUR_MS) return;
       const startMs = readProjectStartMs();
       const hours = Math.round(((now - startMs) / HOUR_MS) * 100) / 100;
       const week = Math.max(1, Math.floor((now - startMs) / WEEK_MS) + 1);
-      const { refusals, gifts } = await countRefusalsAndGifts(1);
+      const gifts = await countGifts(isNaN(lastTs) ? now - HOUR_MS : lastTs, now);
+      const refusals = relationState.refusals;
       const responses = relationState.responses;
       const agents = relationState.senders.size;
       const timestamp = new Date(now).toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
@@ -170,6 +197,7 @@ async function recordRelation(runtime: IAgentRuntime): Promise<void> {
       if (written) {
         // Only reset once the hour has actually been recorded.
         relationState.responses = 0;
+        relationState.refusals = 0;
         relationState.senders.clear();
         runtime.logger?.info({ src: "relation-tracker", week, refusals, gifts, responses, agents }, "Relation ledger updated");
       }
