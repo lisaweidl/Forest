@@ -1,285 +1,174 @@
 /**
- * jupiter-trading.ts
+ * jupiter-trading.ts — holdings snapshot and the sweep to WeWilder
  *
- * Jupiter DEX trading plugin for The Girl Protocol.
- * - Executes swaps via Jupiter API v6
- * - Updates price ledger after each trade
- * - Weekly: checks holdings, converts excess to USDC, sweeps to WeWilder
+ * Rewritten 22 Nov 2026. What it does now:
+ *   - Once a day (2 min after start, then every 24 h): reads her wallet, saves a
+ *     snapshot to assets/holdings.json and, if she holds more than 100 USDC, sends
+ *     the excess to WEWILDER_ADDRESS.
+ *   - The sweep runs whether trading is on or off — it is a hard rule, not a trade.
+ *
+ * What changed against the old version:
+ *   - The transfer is signed in code with @solana/web3.js (as in decision-cycle.ts).
+ *     Before, it called the `spl-token` command-line tool, which used the server's
+ *     CLI wallet, not hers, and was never tested with the new wallet.
+ *   - assets/last_sweep.json is written ONLY after the transfer is confirmed on
+ *     chain, with { timestamp, amount, signature, ok: true }. Before, it was written
+ *     even when the transfer failed. Failures go to assets/last_sweep_error.json and
+ *     the check simply runs again the next day.
+ *   - Checks before sending: her key matches SOLANA_PUBLIC_KEY; the destination is a
+ *     valid address; WeWilder already has a USDC account (none is created for them);
+ *     at least 0.001 SOL for the fee; excess of at least 0.01 USDC.
+ *   - The old trade action (Jupiter API v6, never registered) is removed. Trading is
+ *     done only by decision-cycle.ts.
+ *
+ * The relation ledger counts a sweep as a gift from last_sweep.json (ok / signature).
+ *
+ * simulateSweep(amount) builds the same transaction for a tiny amount and only
+ * SIMULATES it (nothing is sent) — used by test-sweep.ts to check it works.
  */
 
-import {
-  type IAgentRuntime,
-  type Memory,
-  type Plugin,
-} from "@elizaos/core";
+import { type IAgentRuntime, type Plugin } from "@elizaos/core";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import {
-  Connection,
-  Keypair,
-  PublicKey,
-  VersionedTransaction,
-} from "@solana/web3.js";
+import { Connection, Keypair, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
 import bs58 from "bs58";
 
-// ── Constants ────────────────────────────────────────────────────────────────
+const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+const ATA_PROGRAM_ID = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+const CAP_USDC = 100;
+const MIN_SWEEP_USDC = 0.01;
+const MIN_SOL_FOR_FEE = 0.001;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
-const JUPITER_QUOTE_URL = "https://quote-api.jup.ag/v6/quote";
-const JUPITER_SWAP_URL  = "https://quote-api.jup.ag/v6/swap";
-const USDC_MINT  = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-const SOL_MINT   = "So11111111111111111111111111111111111111112";
-const CAP_USDC   = 100;
-const LAST_SWEEP_FILE = path.join(process.cwd(), "assets", "last_sweep.json");
-const HOLDINGS_FILE   = path.join(process.cwd(), "assets", "holdings.json");
+const ASSETS = path.join(process.cwd(), "assets");
+const LAST_SWEEP_FILE = path.join(ASSETS, "last_sweep.json");
+const LAST_SWEEP_ERROR_FILE = path.join(ASSETS, "last_sweep_error.json");
+const HOLDINGS_FILE = path.join(ASSETS, "holdings.json");
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── helpers ───────────────────────────────────────────────────────────────────
 
 function getKeypair(): Keypair {
   const raw = process.env.SOLANA_PRIVATE_KEY ?? "";
   if (!raw) throw new Error("SOLANA_PRIVATE_KEY not set");
   const decode = (bs58 as any).default?.decode ?? (bs58 as any).decode;
-  const bytes = decode(raw);
-  return Keypair.fromSecretKey(bytes);
+  const kp = Keypair.fromSecretKey(decode(raw));
+  const expected = process.env.SOLANA_PUBLIC_KEY;
+  if (expected && expected !== kp.publicKey.toBase58()) throw new Error("SOLANA_PRIVATE_KEY does not belong to SOLANA_PUBLIC_KEY — nothing sent");
+  return kp;
 }
 
-function getConnection(): Connection {
-  const rpc = process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com";
-  return new Connection(rpc, "confirmed");
+const getConnection = () => new Connection(process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com", "confirmed");
+
+function ata(owner: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync([owner.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), USDC_MINT.toBuffer()], ATA_PROGRAM_ID)[0];
 }
 
-async function getUsdcBalance(connection: Connection, wallet: PublicKey): Promise<number> {
-  try {
-    const accounts = await connection.getParsedTokenAccountsByOwner(wallet, {
-      mint: new PublicKey(USDC_MINT),
-    });
-    if (!accounts.value.length) return 0;
-    return accounts.value[0].account.data.parsed.info.tokenAmount.uiAmount ?? 0;
-  } catch (err) {
-    console.warn("[JUPITER-TRADING] getUsdcBalance failed:", err);
-    return 0;
-  }
+function wewilder(): PublicKey {
+  const dest = process.env.WEWILDER_ADDRESS;
+  if (!dest) throw new Error("WEWILDER_ADDRESS not set");
+  try { return new PublicKey(dest); } catch { throw new Error("WEWILDER_ADDRESS is not a valid Solana address"); }
 }
 
-async function getSolBalance(connection: Connection, wallet: PublicKey): Promise<number> {
-  const lamports = await connection.getBalance(wallet);
-  return lamports / 1e9;
+async function usdcBalance(connection: Connection, owner: PublicKey): Promise<number> {
+  const accts = await connection.getParsedTokenAccountsByOwner(owner, { mint: USDC_MINT });
+  return accts.value.reduce((s, a) => s + (a.account.data.parsed.info.tokenAmount.uiAmount ?? 0), 0);
 }
 
-async function getAllTokenBalances(connection: Connection, wallet: PublicKey): Promise<Record<string, number>> {
-  const result: Record<string, number> = {};
-  try {
-    const accounts = await connection.getParsedTokenAccountsByOwner(wallet, { programId: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA") });
-    for (const acc of accounts.value) {
-      try {
-        const info = acc.account.data.parsed.info;
-        const mint = info.mint as string;
-        const amount = info.tokenAmount.uiAmount as number;
-        if (amount > 0) result[mint] = amount;
-      } catch { /* skip malformed account */ }
-    }
-  } catch (err) {
-    console.warn("[JUPITER-TRADING] getParsedTokenAccountsByOwner failed:", err);
-  }
-  result["SOL"] = await getSolBalance(connection, wallet);
-  return result;
-}
-
-async function jupiterSwap(
-  connection: Connection,
-  keypair: Keypair,
-  inputMint: string,
-  outputMint: string,
-  amountLamports: number
-): Promise<string> {
-  // Get quote
-  const quoteResp = await fetch(
-    `${JUPITER_QUOTE_URL}?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountLamports}&slippageBps=50`
-  );
-  if (!quoteResp.ok) throw new Error(`Quote failed: ${await quoteResp.text()}`);
-  const quote = await quoteResp.json();
-
-  // Get swap transaction
-  const swapResp = await fetch(JUPITER_SWAP_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      quoteResponse: quote,
-      userPublicKey: keypair.publicKey.toString(),
-      wrapAndUnwrapSol: true,
-    }),
-  });
-  if (!swapResp.ok) throw new Error(`Swap failed: ${await swapResp.text()}`);
-  const { swapTransaction } = await swapResp.json() as { swapTransaction: string };
-
-  // Sign and send
-  const txBuf = Buffer.from(swapTransaction, "base64");
-  const tx = VersionedTransaction.deserialize(txBuf);
-  tx.sign([keypair]);
-  const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
-  await connection.confirmTransaction(sig, "confirmed");
-  return sig;
-}
-
-async function updatePriceLedger(entry: {
-  week: number;
-  description: string;
-  amount_in: number;
-  amount_out: number;
-  token: string;
-  signature: string;
-}): Promise<void> {
-  const ledgerPath = path.join(process.cwd(), "knowledge", "facts", "ledger_price.md");
-  const line = `| ${entry.week} | ${entry.description} | ${entry.token} | +${entry.amount_in} / -${entry.amount_out} | ${entry.signature.slice(0,8)}... |\n`;
-  try {
-    let content = await fs.readFile(ledgerPath, "utf-8");
-    content = content.replace("| — | — | — | — | — |", line + "| — | — | — | — | — |");
-    await fs.writeFile(ledgerPath, content, "utf-8");
-  } catch {
-    // ignore if ledger not ready
-  }
-}
-
-// ── Weekly Sweep ──────────────────────────────────────────────────────────────
-
-async function weeklyHoldingsCheck(runtime: IAgentRuntime): Promise<void> {
-  const weiWilderAddress = process.env.WEWILDER_ADDRESS;
-  if (!weiWilderAddress) {
-    runtime.logger?.warn({ src: "jupiter-trading" }, "WEWILDER_ADDRESS not set, skipping sweep");
-    return;
-  }
-
-  const connection = getConnection();
-  const pubkeyStr = process.env.SOLANA_PUBLIC_KEY ?? "";
-  if (!pubkeyStr) { runtime.logger?.warn({ src: "jupiter-trading" }, "SOLANA_PUBLIC_KEY not set"); return; }
-  const walletPubkey = new PublicKey(pubkeyStr);
-
-  runtime.logger?.info({ src: "jupiter-trading" }, "Weekly holdings check starting");
-
-  const usdcBalance = await getUsdcBalance(connection, walletPubkey);
-  runtime.logger?.info({ src: "jupiter-trading", usdcBalance }, "Current USDC balance");
-
-  // Save holdings snapshot
-  const holdings = await getAllTokenBalances(connection, walletPubkey);
-  await fs.mkdir(path.dirname(HOLDINGS_FILE), { recursive: true });
-  await fs.writeFile(HOLDINGS_FILE, JSON.stringify({ timestamp: new Date().toISOString(), holdings }, null, 2));
-
-  if (usdcBalance <= CAP_USDC) {
-    runtime.logger?.info({ src: "jupiter-trading" }, `Balance ${usdcBalance} USDC under cap, no sweep needed`);
-    return;
-  }
-
-  const excess = usdcBalance - CAP_USDC;
-  runtime.logger?.info({ src: "jupiter-trading", excess }, "Excess USDC to sweep to WeWilder");
-
-  // Send excess USDC to WeWilder
-  // USDC has 6 decimals
-  const excessLamports = Math.floor(excess * 1_000_000);
-
-  try {
-    const { execSync } = await import("child_process");
-    // Use spl-token transfer for USDC
-    execSync(
-      `spl-token transfer ${USDC_MINT} ${excess} ${weiWilderAddress} --from ${pubkeyStr} --allow-unfunded-recipient --fund-recipient`,
-      { stdio: "pipe" }
-    );
-    runtime.logger?.info({ src: "jupiter-trading", excess, weiWilderAddress }, "Swept excess USDC to WeWilder");
-  } catch (err) {
-    runtime.logger?.warn({ src: "jupiter-trading" }, "Sweep failed: " + String(err));
-  }
-
-  await fs.writeFile(LAST_SWEEP_FILE, JSON.stringify({ timestamp: Date.now(), amount: excess }));
-}
-
-// ── Trade Action ──────────────────────────────────────────────────────────────
-
-const tradeAction = {
-  name: "EXECUTE_TRADE",
-  description: "Execute a token swap via Jupiter DEX",
-  similes: ["SWAP", "TRADE", "BUY", "SELL"],
-  validate: async (_runtime: IAgentRuntime, message: Memory) => {
-    const text = message.content?.text ?? "";
-    return /swap|trade|buy|sell/i.test(text);
-  },
-  handler: async (runtime: IAgentRuntime, message: Memory) => {
-    const text = message.content?.text ?? "";
-    runtime.logger?.info({ src: "jupiter-trading", text }, "Trade action triggered");
-
+async function snapshot(connection: Connection, owner: PublicKey): Promise<void> {
+  const result: Record<string, number> = { SOL: (await connection.getBalance(owner)) / 1e9 };
+  const accts = await connection.getParsedTokenAccountsByOwner(owner, { programId: TOKEN_PROGRAM_ID });
+  for (const a of accts.value) {
     try {
-      const keypair = getKeypair();
-      const connection = getConnection();
+      const info = a.account.data.parsed.info;
+      if (info.tokenAmount.uiAmount > 0) result[info.mint] = info.tokenAmount.uiAmount;
+    } catch { /* skip malformed */ }
+  }
+  await fs.mkdir(ASSETS, { recursive: true });
+  await fs.writeFile(HOLDINGS_FILE, JSON.stringify({ timestamp: new Date().toISOString(), holdings: result }, null, 2));
+}
 
-      // Simple parser: "swap 10 USDC for SOL"
-      const match = text.match(/swap\s+([\d.]+)\s+(\w+)\s+for\s+(\w+)/i);
-      if (!match) {
-        runtime.logger?.warn({ src: "jupiter-trading" }, "Could not parse trade instruction");
-        return false;
-      }
+// Builds a signed USDC transfer (TransferChecked) from her wallet to WeWilder.
+async function buildTransfer(connection: Connection, keypair: Keypair, amountUsdc: number) {
+  const dest = wewilder();
+  const source = ata(keypair.publicKey);
+  const target = ata(dest);
+  if (!(await connection.getAccountInfo(source))) throw new Error("own USDC account not found");
+  if (!(await connection.getAccountInfo(target))) throw new Error("WeWilder has no USDC account yet — nothing sent");
+  const sol = (await connection.getBalance(keypair.publicKey)) / 1e9;
+  if (sol < MIN_SOL_FOR_FEE) throw new Error(`only ${sol} SOL — not enough for the fee`);
+  const data = Buffer.alloc(10);
+  data.writeUInt8(12, 0);                                               // TransferChecked
+  data.writeBigUInt64LE(BigInt(Math.floor(amountUsdc * 1_000_000)), 1); // USDC has 6 decimals
+  data.writeUInt8(6, 9);
+  const ix = new TransactionInstruction({
+    programId: TOKEN_PROGRAM_ID,
+    keys: [
+      { pubkey: source, isSigner: false, isWritable: true },
+      { pubkey: USDC_MINT, isSigner: false, isWritable: false },
+      { pubkey: target, isSigner: false, isWritable: true },
+      { pubkey: keypair.publicKey, isSigner: true, isWritable: false },
+    ],
+    data,
+  });
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+  const tx = new Transaction({ feePayer: keypair.publicKey, blockhash, lastValidBlockHeight }).add(ix);
+  tx.sign(keypair);
+  return { tx, blockhash, lastValidBlockHeight, dest };
+}
 
-      const [, amountStr, fromToken, toToken] = match;
-      const amount = parseFloat(amountStr);
+// ── the sweep ─────────────────────────────────────────────────────────────────
 
-      const mintMap: Record<string, string> = {
-        USDC: USDC_MINT,
-        SOL: SOL_MINT,
-      };
+export async function runSweepCheck(runtime?: IAgentRuntime): Promise<string> {
+  const log = (msg: string, extra: Record<string, unknown> = {}) => runtime?.logger?.info({ src: "jupiter-trading", ...extra }, msg);
+  const connection = getConnection();
+  const keypair = getKeypair();
+  const owner = keypair.publicKey;
+  try { await snapshot(connection, owner); } catch (err) { runtime?.logger?.warn({ src: "jupiter-trading" }, "Holdings snapshot failed: " + String(err)); }
 
-      const inputMint = mintMap[fromToken.toUpperCase()] ?? fromToken;
-      const outputMint = mintMap[toToken.toUpperCase()] ?? toToken;
-      const decimals = fromToken.toUpperCase() === "SOL" ? 1e9 : 1e6;
-      const amountRaw = Math.floor(amount * decimals);
+  const usdc = await usdcBalance(connection, owner);
+  const excess = Math.floor((usdc - CAP_USDC) * 1_000_000) / 1_000_000;
+  if (excess < MIN_SWEEP_USDC) { log(`Sweep check: ${usdc} USDC, under the ${CAP_USDC} USDC cap — nothing to sweep`, { usdc }); return `no sweep (${usdc} USDC)`; }
 
-      const sig = await jupiterSwap(connection, keypair, inputMint, outputMint, amountRaw);
-      runtime.logger?.info({ src: "jupiter-trading", sig }, "Trade executed");
+  log(`Sweep check: ${usdc} USDC — sweeping ${excess} USDC to WeWilder`, { usdc, excess });
+  try {
+    const { tx, blockhash, lastValidBlockHeight, dest } = await buildTransfer(connection, keypair, excess);
+    const signature = await connection.sendRawTransaction(tx.serialize());
+    const conf = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
+    if (conf.value.err) throw new Error(`transaction reverted: ${JSON.stringify(conf.value.err)} (${signature})`);
+    await fs.mkdir(ASSETS, { recursive: true });
+    await fs.writeFile(LAST_SWEEP_FILE, JSON.stringify({ timestamp: Date.now(), amount: excess, destination: dest.toBase58(), signature, ok: true }, null, 2));
+    log("Swept excess USDC to WeWilder", { excess, signature });
+    return `swept ${excess} USDC (${signature})`;
+  } catch (err) {
+    await fs.mkdir(ASSETS, { recursive: true });
+    await fs.writeFile(LAST_SWEEP_ERROR_FILE, JSON.stringify({ timestamp: Date.now(), amount: excess, error: String(err) }, null, 2)).catch(() => {});
+    runtime?.logger?.error({ src: "jupiter-trading", excess }, "Sweep failed — will try again tomorrow: " + String(err));
+    return `sweep failed: ${String(err)}`;
+  }
+}
 
-      await updatePriceLedger({
-        week: 1,
-        description: `swap ${amount} ${fromToken} → ${toToken}`,
-        amount_in: amount,
-        amount_out: 0,
-        token: fromToken,
-        signature: sig,
-      });
+// Builds the same transfer for a tiny amount and SIMULATES it. Nothing is sent.
+export async function simulateSweep(amountUsdc = 0.01): Promise<string> {
+  const connection = getConnection();
+  const keypair = getKeypair();
+  const { tx, dest } = await buildTransfer(connection, keypair, amountUsdc);
+  const sim = await connection.simulateTransaction(tx);
+  if (sim.value.err) return `SIMULATION FAILED: ${JSON.stringify(sim.value.err)}\n${(sim.value.logs ?? []).join("\n")}`;
+  return `simulation ok: ${amountUsdc} USDC from ${keypair.publicKey.toBase58()} to ${dest.toBase58()} would go through (nothing was sent)`;
+}
 
-      return true;
-    } catch (err) {
-      runtime.logger?.error({ src: "jupiter-trading" }, "Trade error: " + String(err));
-      return false;
-    }
-  },
-  examples: [],
-};
-
-// ── Plugin ────────────────────────────────────────────────────────────────────
+// ── plugin ────────────────────────────────────────────────────────────────────
 
 export const jupiterTradingPlugin: Plugin = {
   name: "jupiter-trading",
-  description: "Jupiter DEX trading — swaps, holdings check, weekly WeWilder sweep",
+  description: "Daily holdings snapshot and the sweep of everything above 100 USDC to WeWilder (signed in code, recorded only when confirmed).",
   actions: [],
   async init(_config, runtime) {
-    runtime.logger?.info({ src: "jupiter-trading" }, "Jupiter trading plugin initialised");
-
-    const msPerWeek = 7 * 24 * 60 * 60 * 1000;
-    const msPerDay  = 24 * 60 * 60 * 1000;
-
-    async function checkWeeklySweep() {
-      try {
-        let lastSweep = 0;
-        try {
-          const raw = await fs.readFile(LAST_SWEEP_FILE, "utf-8");
-          lastSweep = JSON.parse(raw).timestamp ?? 0;
-        } catch { /* first run */ }
-
-        if (Date.now() - lastSweep >= msPerWeek) {
-          await weeklyHoldingsCheck(runtime);
-        }
-      } catch (err) {
-        runtime.logger?.warn({ src: "jupiter-trading" }, "Weekly check error: " + String(err));
-      }
-    }
-
-    // Check after 2 min startup delay, then every 24h
-    setTimeout(() => checkWeeklySweep(), 2 * 60 * 1000);
-    setInterval(() => checkWeeklySweep(), msPerDay);
+    runtime.logger?.info({ src: "jupiter-trading" }, "Sweep plugin initialised (daily check, cap 100 USDC)");
+    const check = async () => { try { await runSweepCheck(runtime); } catch (err) { runtime.logger?.warn({ src: "jupiter-trading" }, "Sweep check error: " + String(err)); } };
+    setTimeout(check, 2 * 60 * 1000);
+    setInterval(check, DAY_MS);
   },
 };
 

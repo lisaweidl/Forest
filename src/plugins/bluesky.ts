@@ -51,14 +51,29 @@ async function xrpc<T>(base: string, method: string, opts: { jwt?: string; query
   return (text ? JSON.parse(text) : {}) as T;
 }
 
+// One session is kept and refreshed instead of logging in on every call
+// (Bluesky allows about 300 logins a day; the reply loop alone polls 144 times).
+type SessionReply = { did: string; accessJwt: string; refreshJwt: string; didDoc?: { service?: { id: string; serviceEndpoint: string }[] } };
+let cached: (Session & { refreshJwt: string; at: number }) | null = null;
+const ACCESS_TTL_MS = 60 * 60 * 1000;
+
+function toSession(s: SessionReply, service: string) {
+  const pds = s.didDoc?.service?.find((x) => x.id === "#atproto_pds")?.serviceEndpoint ?? service;
+  return { did: s.did, accessJwt: s.accessJwt, refreshJwt: s.refreshJwt, pds, at: Date.now() };
+}
+
 async function login(): Promise<Session> {
   const service = process.env.BLUESKY_SERVICE || "https://bsky.social";
-  const s = await xrpc<{ did: string; accessJwt: string; didDoc?: { service?: { id: string; serviceEndpoint: string }[] } }>(
-    service, "com.atproto.server.createSession",
-    { json: { identifier: process.env.BLUESKY_HANDLE, password: process.env.BLUESKY_APP_PASSWORD } },
-  );
-  const pds = s.didDoc?.service?.find((x) => x.id === "#atproto_pds")?.serviceEndpoint ?? service;
-  return { did: s.did, accessJwt: s.accessJwt, pds };
+  if (cached && Date.now() - cached.at < ACCESS_TTL_MS) return cached;
+  if (cached) {
+    try {
+      cached = toSession(await xrpc<SessionReply>(cached.pds, "com.atproto.server.refreshSession", { jwt: cached.refreshJwt }), service);
+      return cached;
+    } catch { cached = null; }
+  }
+  cached = toSession(await xrpc<SessionReply>(service, "com.atproto.server.createSession",
+    { json: { identifier: process.env.BLUESKY_HANDLE, password: process.env.BLUESKY_APP_PASSWORD } }), service);
+  return cached;
 }
 
 function graphemes(text: string): number {
@@ -210,4 +225,46 @@ export async function setBlueskyAvatar(image: Buffer): Promise<string> {
     json: { repo: s.did, collection: "app.bsky.actor.profile", rkey: "self", record: { ...record, avatar: blob }, ...(swapRecord ? { swapRecord } : {}) },
   });
   return "profile picture updated";
+}
+
+// ── for the social loop (bluesky-social.ts) ───────────────────────────────────
+
+export function blueskyReady(): string | null { return configured(); }
+
+export interface BskyNotification {
+  uri: string; cid: string; reason: string; indexedAt: string;
+  author: { did: string; handle: string; displayName?: string };
+  record: { text?: string; reply?: { root: StrongRef; parent: StrongRef } };
+}
+
+export async function myDid(): Promise<string> { return (await login()).did; }
+
+export async function listNotifications(limit = 50): Promise<BskyNotification[]> {
+  const s = await login();
+  const r = await xrpc<{ notifications: BskyNotification[] }>(s.pds, "app.bsky.notification.listNotifications", { jwt: s.accessJwt, get: true, query: { limit: String(limit) } });
+  return r.notifications ?? [];
+}
+
+export async function markNotificationsSeen(seenAt = new Date().toISOString()): Promise<void> {
+  const s = await login();
+  await xrpc(s.pds, "app.bsky.notification.updateSeen", { jwt: s.accessJwt, json: { seenAt } });
+}
+
+// Replies to one post; only the first 300 characters are used (one post, no thread).
+export async function replyOnBluesky(text: string, to: { uri: string; cid: string; root?: StrongRef }): Promise<string> {
+  const skip = configured(); if (skip) return skip;
+  const s = await login();
+  const first = splitForPosts(text.trim())[0] ?? "";
+  if (!first) return "nothing to say";
+  const parent = { uri: to.uri, cid: to.cid };
+  const ref = await createPost(s, first, { reply: { root: to.root ?? parent, parent } });
+  return `reply ${ref.uri}`;
+}
+
+export async function myRecentPosts(limit = 10): Promise<string[]> {
+  const s = await login();
+  const r = await xrpc<{ feed: { post: { record: { text?: string } } }[] }>(s.pds, "app.bsky.feed.getAuthorFeed", {
+    jwt: s.accessJwt, get: true, query: { actor: s.did, limit: String(limit), filter: "posts_no_replies" },
+  });
+  return (r.feed ?? []).map((f) => f.post?.record?.text ?? "").filter(Boolean);
 }

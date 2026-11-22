@@ -171,6 +171,15 @@ const relationEvaluator = {
   examples: [],
 };
 
+// Messages that arrive outside ElizaOS's message pipeline (e.g. Bluesky replies,
+// see bluesky-social.ts) are counted here the same way.
+export function recordExternalMessage(sender: string, text: string): void {
+  if (!sender) return;
+  relationState.responses++;
+  relationState.senders.add(sender);
+  if (isMoneyRequest(text)) relationState.refusals++;
+}
+
 async function recordRelation(runtime: IAgentRuntime): Promise<void> {
     if (relationState.running) return;
     relationState.running = true;
