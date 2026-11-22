@@ -46,6 +46,9 @@
  *   ANTHROPIC_API_KEY in .env (via ElizaOS config)
  *   FARCASTER_NEYNAR_API_KEY in .env  <- new for avatar
  *   FARCASTER_SIGNER_UUID in .env    <- new for avatar
+ *   BLUESKY_HANDLE, BLUESKY_APP_PASSWORD in .env (optional, 22 Nov 2026) — spell, body,
+ *     avatar and avatar announcement also go to Bluesky (see bluesky.ts); without them
+ *     Bluesky is skipped and everything else runs as before.
  */
 
 import {
@@ -61,6 +64,7 @@ import * as path from "node:path";
 import { fal } from '@fal-ai/client';
 import { generateWeeklySummary, recentLedgerText, readWeeklySummaries } from "./history";
 import { recordGeneration } from "./consumption-tracker";
+import { postTextToBluesky, postVideoToBluesky, postImageToBluesky, setBlueskyAvatar } from "./bluesky";
 
 // ── Character Entry texts (8 Nov 2026). Edit here, not in the prompts below. ──
 
@@ -722,6 +726,10 @@ async function runAvatarStep(runtime: IAgentRuntime, ledgers: { price: string; r
   }
   try { const s = await castAvatarToFarcaster(announcement, imageBuffer, `avatar_week${pad}.jpg`, falApiKey); announced += ` farcaster: ${s}.`; }
   catch (err) { announced += " farcaster announcement failed."; runtime.logger?.error({ src: "weekly-reckoning", err }, "Avatar announcement to Farcaster failed"); }
+  try { announced += ` bluesky profile: ${await setBlueskyAvatar(imageBuffer)}.`; }
+  catch (err) { announced += " bluesky profile update failed."; runtime.logger?.error({ src: "weekly-reckoning", err }, "Bluesky avatar update failed"); }
+  try { announced += ` bluesky: ${await postImageToBluesky(imageBuffer, announcement, choice.description || "The Girl's new avatar")}.`; }
+  catch (err) { announced += " bluesky announcement failed."; runtime.logger?.error({ src: "weekly-reckoning", err }, "Avatar announcement to Bluesky failed"); }
   if (choice.description) await fs.writeFile(AVATAR_DESCRIPTION_PATH, choice.description + "\n", "utf-8").catch(() => {});
   await fs.appendFile(getProtocolPath(weekNum, "choices"), `announcement: ${announcement}\n${announced.trim()}\n`, "utf-8").catch(() => {});
   runtime.logger?.info({ src: "weekly-reckoning" }, "Avatar crystallization saved");
@@ -752,21 +760,27 @@ const weeklyReckoningAction: Action = {
     let spellCastStatus = "not cast";
     try { spellCastStatus = await castSpellToFarcaster(chosenSpell.text); runtime.logger?.info({ src: "weekly-reckoning" }, "Spell Farcaster: " + spellCastStatus); }
     catch (err) { spellCastStatus = "failed"; runtime.logger?.error({ src: "weekly-reckoning", err }, "Failed to cast spell to Farcaster"); }
+    let spellBskyStatus = "not posted";
+    try { spellBskyStatus = await postTextToBluesky(chosenSpell.text); runtime.logger?.info({ src: "weekly-reckoning" }, "Spell Bluesky: " + spellBskyStatus); }
+    catch (err) { spellBskyStatus = "failed"; runtime.logger?.error({ src: "weekly-reckoning", err }, "Failed to post spell to Bluesky"); }
     runtime.logger?.info({ src: "weekly-reckoning" }, "Generating body candidates...");
     const { candidates: bodyPrompts, crystallization: bodyCrystallization } = await generateBodyPrompts(runtime, ledgers, chosenSpell.text);
     const bodyCandidates = await generateBodyCandidates(bodyPrompts, falApiKey, weekNum);
     const { chosen: chosenBody, reasoning: bodyReasoning, skipped: bodySkipped } = await chooseBody(runtime, bodyCandidates);
     let bodyCastStatus = "not cast";
+    let bodyBskyStatus = "not posted";
     if (!bodySkipped && chosenBody.mergedVideoBuffer) {
       const filename = `week_${String(weekNum).padStart(2, "0")}.mp4`;
       try { await postVideoToTelegram(chosenBody.mergedVideoBuffer, `week ${weekNum}`, telegramToken, telegramChatId, filename); runtime.logger?.info({ src: "weekly-reckoning" }, "Body posted to Telegram"); }
       catch (err) { runtime.logger?.error({ src: "weekly-reckoning", err }, "Failed to post body to Telegram"); }
       try { bodyCastStatus = await castBodyToFarcaster(chosenBody.mergedVideoBuffer, filename, falApiKey); runtime.logger?.info({ src: "weekly-reckoning" }, "Body Farcaster: " + bodyCastStatus); }
       catch (err) { bodyCastStatus = "failed"; runtime.logger?.error({ src: "weekly-reckoning", err }, "Failed to cast body to Farcaster"); }
+      try { bodyBskyStatus = await postVideoToBluesky(chosenBody.mergedVideoBuffer, BODY_SIGNATURE, filename); runtime.logger?.info({ src: "weekly-reckoning" }, "Body Bluesky: " + bodyBskyStatus); }
+      catch (err) { bodyBskyStatus = "failed"; runtime.logger?.error({ src: "weekly-reckoning", err }, "Failed to post body to Bluesky"); }
     }
     await writeDiary(runtime, weekNum, ledgers);
     await writeChoices(runtime, weekNum, spellCandidates, chosenSpell, spellReasoning, bodyCandidates, chosenBody, bodyReasoning, bodySkipped);
-    await fs.appendFile(getProtocolPath(weekNum, "choices"), `\n${"═".repeat(50)}\n\nbody crystallization\n${"─".repeat(20)}\n\n${bodyCrystallization}\n\nfarcaster — spell: ${spellCastStatus} · body: ${bodyCastStatus}\n`, "utf-8");
+    await fs.appendFile(getProtocolPath(weekNum, "choices"), `\n${"═".repeat(50)}\n\nbody crystallization\n${"─".repeat(20)}\n\n${bodyCrystallization}\n\nfarcaster — spell: ${spellCastStatus} · body: ${bodyCastStatus}\nbluesky — spell: ${spellBskyStatus} · body: ${bodyBskyStatus}\n`, "utf-8");
     await writeBodyCrystallization(bodyCrystallization);
     const soulStatus = await reflectOnSoul(runtime, weekNum, spellReasoning, bodyReasoning);
     runtime.logger?.info({ src: "weekly-reckoning" }, "Running avatar step...");
@@ -793,7 +807,7 @@ const weeklyReckoningAction: Action = {
       git("push");
       runtime.logger?.info({ src: "weekly-reckoning", weekNum }, "Protocols pushed to GitHub");
     } catch (err) { runtime.logger?.warn({ src: "weekly-reckoning" }, "GitHub push failed: " + String(err)); }
-    if (callback) { await callback({ text: `week ${weekNum} reckoning done. spell posted to telegram; farcaster: ${spellCastStatus}. ${bodySkipped ? "no body this week." : `body (video + audio) posted to telegram; farcaster: ${bodyCastStatus}.`} diary and choices written. ${soulStatus} ${avatarStatus} ${summaryStatus}` }); }
+    if (callback) { await callback({ text: `week ${weekNum} reckoning done. spell posted to telegram; farcaster: ${spellCastStatus}; bluesky: ${spellBskyStatus}. ${bodySkipped ? "no body this week." : `body (video + audio) posted to telegram; farcaster: ${bodyCastStatus}; bluesky: ${bodyBskyStatus}.`} diary and choices written. ${soulStatus} ${avatarStatus} ${summaryStatus}` }); }
   },
   examples: [],
 };
