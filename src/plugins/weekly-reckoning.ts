@@ -29,6 +29,10 @@
  * Spell is also cast to Farcaster (one cast; split into a short thread only if
  * Farcaster rejects it as too long). Body crystallization is carried forward in
  * protocols/body_crystallization.txt, like the avatar's.
+ *
+ * 22 Nov 2026: all three avatar candidates are kept as protocols/avatar_weekXX_<A|B|C>.jpg
+ * (like the bodies) and pushed to GitHub; the new face is announced with its image on
+ * Telegram and Farcaster: "my avatar looked like this: … i just changed my avatar to this: …"
  * 7. WEEKLY SUMMARY — via history.ts: week figures + her summary, posted to the
  *    Telegram group and saved to knowledge/history/ (8 Nov 2026).
  * The spell prompt also gets all earlier weekly summaries; body and avatar get the
@@ -573,7 +577,7 @@ Respond in JSON only. Escape line breaks inside strings as \\n.
 }
 
 // She sees the prompts (the model is text-only), chooses one, and writes the note that carries forward.
-async function chooseAvatar(runtime: IAgentRuntime, candidates: { label: Label; imagePrompt: string }[], previousCrystallization: string): Promise<{ chosen: Label; reasoning: string; crystallization: string }> {
+async function chooseAvatar(runtime: IAgentRuntime, candidates: { label: Label; imagePrompt: string }[], previousCrystallization: string): Promise<{ chosen: Label; reasoning: string; crystallization: string; description: string }> {
   const prompt = `You are The Girl. You made ${candidates.length} faces for this week.
 
 What you wrote down about last week's face:
@@ -586,12 +590,64 @@ Choose one to become your Farcaster profile picture. Respond in JSON only:
 {
   "chosen": ${candidates.map((c) => `"${c.label}"`).join(" or ")},
   "reasoning": "why this face, in your own voice, 2-4 sentences",
-  "crystallization": "your private note about this face, 3-6 sentences, girl math voice, lowercase: what you noticed, what shaped it, what carries forward"
+  "crystallization": "your private note about this face, 3-6 sentences, girl math voice, lowercase: what you noticed, what shaped it, what carries forward",
+  "description": "what the chosen face looks like, for people who will see it: one plain sentence, lowercase, at most 110 characters, no ending full stop"
 }`;
   const response = await runtime.useModel(ModelType.TEXT_LARGE, { prompt });
-  const parsed = parseModelJson<{ chosen: Label; reasoning: string; crystallization: string }>(response);
+  const parsed = parseModelJson<{ chosen: Label; reasoning: string; crystallization: string; description: string }>(response);
   const chosen = candidates.some((c) => c.label === parsed.chosen) ? parsed.chosen : candidates[0].label;
-  return { chosen, reasoning: parsed.reasoning ?? "", crystallization: parsed.crystallization ?? "" };
+  return { chosen, reasoning: parsed.reasoning ?? "", crystallization: parsed.crystallization ?? "", description: cleanDescription(parsed.description ?? "") };
+}
+
+// ── Avatar announcement (22 Nov 2026) ─────────────────────────────────────────
+// "my avatar looked like this: <last week's description>. i just changed my avatar
+// to this: <this week's description>." — with the new image, to the Telegram group
+// and to Farcaster. The description is kept in protocols/avatar_description.txt so
+// next week can say what it looked like before.
+const AVATAR_DESCRIPTION_PATH = path.join(process.cwd(), "protocols", "avatar_description.txt");
+
+function cleanDescription(s: string): string {
+  let d = s.replace(/\s+/g, " ").trim().replace(/[.\s]+$/, "");
+  if (d.length > 110) d = d.slice(0, 110).replace(/\s+\S*$/, "") + "…";
+  return d;
+}
+
+async function readAvatarDescription(): Promise<string> {
+  try { return cleanDescription(await fs.readFile(AVATAR_DESCRIPTION_PATH, "utf-8")); } catch { return ""; }
+}
+
+function avatarAnnouncement(previous: string, current: string): string {
+  const end = (s: string) => (s.endsWith("…") ? s : `${s}.`);
+  const now = end(current || "a new face");
+  return previous
+    ? `my avatar looked like this: ${end(previous)} i just changed my avatar to this: ${now}`
+    : `i just changed my avatar to this: ${now}`;
+}
+
+async function postPhotoToTelegram(imageBuffer: Buffer, caption: string, botToken: string, chatId: string, filename: string): Promise<void> {
+  const formData = new FormData();
+  formData.append("chat_id", chatId);
+  formData.append("caption", caption);
+  formData.append("photo", new Blob([imageBuffer], { type: "image/jpeg" }), filename);
+  const response = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, { method: "POST", body: formData });
+  if (!response.ok) throw new Error(`Telegram sendPhoto error: ${response.status} — ${await response.text()}`);
+}
+
+async function castAvatarToFarcaster(text: string, imageBuffer: Buffer, filename: string, falApiKey: string): Promise<string> {
+  if (process.env.FARCASTER_DRY_RUN === "true") return "skipped (FARCASTER_DRY_RUN=true)";
+  if (!process.env.FARCASTER_NEYNAR_API_KEY || !process.env.FARCASTER_SIGNER_UUID) return "skipped (missing FARCASTER_NEYNAR_API_KEY or FARCASTER_SIGNER_UUID)";
+  fal.config({ credentials: falApiKey });
+  const publicUrl = await fal.storage.upload(new File([imageBuffer], filename, { type: "image/jpeg" }));
+  const parts = splitForCasts(text);
+  let parent: string | undefined;
+  let first = "";
+  for (let i = 0; i < parts.length; i++) {
+    const r = await neynarCast(parts[i], parent, i === 0 ? [{ url: publicUrl }] : undefined);
+    if (!r.ok) throw new Error(`Neynar cast error: ${r.status} — ${r.body}`);
+    parent = r.hash;
+    if (i === 0) first = r.hash ?? "unknown";
+  }
+  return `cast ${first}${parts.length > 1 ? ` (thread of ${parts.length})` : ""}`;
 }
 
 async function generateAvatarImage(imagePrompt: string, falApiKey: string): Promise<Buffer | null> {
@@ -644,20 +700,33 @@ async function runAvatarStep(runtime: IAgentRuntime, ledgers: { price: string; r
   }));
   const made = images.filter((i): i is { label: Label; imagePrompt: string; buf: Buffer } => !!i);
   if (made.length === 0) { runtime.logger?.error({ src: "weekly-reckoning" }, "Avatar image generation failed"); return "avatar skipped (image generation failed)."; }
-  let choice: { chosen: Label; reasoning: string; crystallization: string };
+  let choice: { chosen: Label; reasoning: string; crystallization: string; description: string };
   try { choice = await chooseAvatar(runtime, made.map(({ label, imagePrompt }) => ({ label, imagePrompt })), previousCrystallization); }
-  catch (err) { runtime.logger?.error({ src: "weekly-reckoning" }, "Avatar choice failed: " + String(err)); choice = { chosen: made[0].label, reasoning: "(choice failed — first candidate used)", crystallization: previousCrystallization }; }
+  catch (err) { runtime.logger?.error({ src: "weekly-reckoning" }, "Avatar choice failed: " + String(err)); choice = { chosen: made[0].label, reasoning: "(choice failed — first candidate used)", crystallization: previousCrystallization, description: "" }; }
   const picked = made.find((m) => m.label === choice.chosen) ?? made[0];
   const imageBuffer = picked.buf;
   const crystallization = choice.crystallization || previousCrystallization;
   const avatarPath = path.join(process.cwd(), "protocols", `avatar_week${pad}.jpg`);
   await fs.writeFile(avatarPath, imageBuffer);
-  await fs.appendFile(getProtocolPath(weekNum, "choices"), `\n${"═".repeat(50)}\n\navatar candidates\n${"─".repeat(20)}\n\n${made.map((m) => `candidate ${m.label}:\n${m.imagePrompt}`).join("\n\n")}\n\nchosen: candidate ${picked.label}\nreasoning: ${choice.reasoning}\n`, "utf-8").catch(() => {});
+  await fs.appendFile(getProtocolPath(weekNum, "choices"), `\n${"═".repeat(50)}\n\navatar candidates\n${"─".repeat(20)}\n\n${made.map((m) => `candidate ${m.label} (protocols/avatar_week${pad}_${m.label}.jpg):\n${m.imagePrompt}`).join("\n\n")}\n\nchosen: candidate ${picked.label}\nreasoning: ${choice.reasoning}\ndescription: ${choice.description || "—"}\n`, "utf-8").catch(() => {});
   const success = await uploadAndSetFarcasterAvatar(imageBuffer, neynarApiKey, neynarSignerUuid);
   await writeAvatarCrystallization(crystallization);
+  // Announce the new face: Telegram group + Farcaster, with the image.
+  const previousDescription = await readAvatarDescription();
+  const announcement = avatarAnnouncement(previousDescription, choice.description);
+  let announced = "";
+  const tgToken = process.env.TELEGRAM_BOT_TOKEN, tgChat = process.env.TELEGRAM_CHAT_ID;
+  if (tgToken && tgChat) {
+    try { await postPhotoToTelegram(imageBuffer, announcement, tgToken, tgChat, `avatar_week${pad}.jpg`); announced += " announced on telegram."; }
+    catch (err) { runtime.logger?.error({ src: "weekly-reckoning", err }, "Avatar announcement to Telegram failed"); }
+  }
+  try { const s = await castAvatarToFarcaster(announcement, imageBuffer, `avatar_week${pad}.jpg`, falApiKey); announced += ` farcaster: ${s}.`; }
+  catch (err) { announced += " farcaster announcement failed."; runtime.logger?.error({ src: "weekly-reckoning", err }, "Avatar announcement to Farcaster failed"); }
+  if (choice.description) await fs.writeFile(AVATAR_DESCRIPTION_PATH, choice.description + "\n", "utf-8").catch(() => {});
+  await fs.appendFile(getProtocolPath(weekNum, "choices"), `announcement: ${announcement}\n${announced.trim()}\n`, "utf-8").catch(() => {});
   runtime.logger?.info({ src: "weekly-reckoning" }, "Avatar crystallization saved");
-  if (success) { runtime.logger?.info({ src: "weekly-reckoning" }, "Farcaster avatar updated successfully"); return "new avatar set on farcaster."; }
-  else { runtime.logger?.warn({ src: "weekly-reckoning" }, "Farcaster avatar update failed, image saved locally"); return "avatar generated but farcaster update failed — image saved locally."; }
+  if (success) { runtime.logger?.info({ src: "weekly-reckoning" }, "Farcaster avatar updated successfully"); return `new avatar set on farcaster.${announced}`; }
+  else { runtime.logger?.warn({ src: "weekly-reckoning" }, "Farcaster avatar update failed, image saved locally"); return `avatar generated but farcaster profile update failed — image saved locally.${announced}`; }
 }
 
 const weeklyReckoningAction: Action = {
@@ -711,6 +780,11 @@ const weeklyReckoningAction: Action = {
       const { execSync } = await import("child_process");
       const git = (args: string) => execSync(`git -C /root/the-girl ${args}`, { stdio: "pipe" });
       git("add protocols/ knowledge/facts/ knowledge/history/ knowledge/SOUL.md knowledge/soul-backups/ alambic/decision_log/");
+      // All candidates (chosen or not) go to GitHub, even if .gitignore excludes images or videos.
+      const pad = String(weekNum).padStart(2, "0");
+      for (const f of [`protocols/avatar_week${pad}.jpg`, ...LABELS.map((l) => `protocols/avatar_week${pad}_${l}.jpg`), ...LABELS.map((l) => `protocols/body_week${pad}_${l}.mp4`)]) {
+        try { git(`add -f ${f}`); } catch { /* file not made this week */ }
+      }
       git(`commit -m "week ${String(weekNum).padStart(2,"0")} protocols" --allow-empty`);
       // Team uploads via GitHub in between: merge them first. On a conflict the server's
       // version wins (her SOUL, the measured ledgers); if the merge still fails, abort it.
