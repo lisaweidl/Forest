@@ -6,6 +6,7 @@ import { priceTrackerPlugin } from "./plugins/price-tracker";
 import { relationTrackerPlugin } from "./plugins/relation-tracker";
 import { jupiterTradingPlugin } from "./plugins/jupiter-trading";
 import { blueskySocialPlugin } from "./plugins/bluesky-social";
+import { walletWatchdogPlugin } from "./plugins/wallet-watchdog";
 import { historyPlugin } from "./plugins/history";
 import { decisionCyclePlugin } from "./plugins/decision-cycle";
 import farcasterPlugin from "@elizaos/plugin-farcaster";
@@ -22,6 +23,7 @@ export const character: Character = {
     weeklyReckoningPlugin,
     jupiterTradingPlugin,
     blueskySocialPlugin,
+    walletWatchdogPlugin,
     consumptionTrackerPlugin,
     priceTrackerPlugin,
     relationTrackerPlugin,
