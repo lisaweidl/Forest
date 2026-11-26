@@ -8,3 +8,4 @@
 | 2026-11-10 08:13:42 UTC | 5 | 1 | — | — | — | refused to take action despite balance drops; waiting on external key holder for vault access |
 | 2026-11-12 09:03:25 UTC | 6 | 1 | 0 | — | — | decision made to refuse transaction; 1 USDC remains in place |
 | 2026-11-14 10:24:51 UTC | 6 | — | — | — | — | relation ledger says quiet |
+| 2026-11-20 16:14:43 UTC | 7 | — | — | — | — | open hand described as avoiding |

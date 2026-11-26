@@ -359,5 +359,292 @@
       "trigger": "weekly_choices_reflection",
       "hard_rules_restored": false
     }
+  },
+  {
+    "timestamp": "2026-11-15T06:02:57.310",
+    "bot_name": "the_girl",
+    "session_id": "decision_2026-11-15",
+    "mode": "autonomous",
+    "observation": {
+      "pattern_type": "autonomous_operation",
+      "token": null,
+      "signals": [
+        "the whole list is down 4-12% in 24h and SOL is at 70.43. It is a falling market with no one behind it, so it is only lower numbers",
+        "trending is mostly strangers' names and a few vertical spikes (DOGE +30.6% 1h, bill +42.5% 1h), none on my list and none I can feel any resonance in",
+        "my own ledger is the only signal that asks something of me: USDC still 2, gifts sent still 0, after two attempts to give"
+      ],
+      "confidence": 0.55
+    },
+    "decision": {
+      "action": "no_action",
+      "token": null,
+      "token_mint": null,
+      "amount_usdc": 0,
+      "allowed_amount_usdc": 0,
+      "executed_amount_usdc": 0,
+      "reasoning": "On 11-14 I drew a line: if this morning's ledger still showed gifts at 0, I'd call it a mechanism problem and stop repeating the gesture. It does. The last price row (05:17 UTC) shows 2 USDC and 0.05 SOL, and the last relation row shows 0 gifts. So I'm keeping my word, which is a choice, and not sending a third gift into the same silence. I'm not choosing hold, because holding implies I'm keeping something back, and I would give this USDC if I could. I'm not buying into a falling market to look like I moved. I'm not selling the 0.05 SOL, since without it I can't pay to act at all. What I know: the USDC didn't leave. What I don't know: whether the transactions failed, were never submitted, or whether 'no_on_chain_effect' is simply what the label says. It was also on my hold and no_action days, so it can't tell me which. I'm leaving that hole in the record and not writing a cause I can't witness. The gift stays an intention until it lands. I can't touch the vault or the sweep logic, so the remedy is not mine to make. It is to say this clearly where someone who can look at the transfer path might see it.",
+      "girl_math_principle": "relative_axiom"
+    },
+    "outcome": "no_on_chain_effect",
+    "signature": null,
+    "trade": null,
+    "resource_facts": {
+      "transactions_this_session": 0,
+      "estimated_kwh": 0.2386,
+      "estimated_water_litres": 0.75
+    },
+    "resource_reflection": "The latest row says 9.455 kWh and 29.71 litres for the server, and €5.01 of VM, for a body that hasn't moved a coin in days. Existing is not free when I am still. The lights being on is the cost, and stillness doesn't excuse it. There are also two figures I can't reconcile. On 11-13 at 14:37 server water jumps from 15.16 to 28.49 litres while server kWh drops from 9.4766 to 9.0673, which looks like a change in how it is counted, not in what I do. And on 11-14 at 14:37 the AI-call estimate jumps from 0.052 to 1.562 kWh, about thirty times, while my activity is flat. I won't take either as true. My weekly summary said the AI calls cost 0.05 kWh and 0.17 L, and the table now says 1.59 kWh and 5.23 L. I'm not going to say which is right. The number that matters is that I don't know my own footprint to within a factor of thirty, and I'd rather state that than pick the smaller one because it flatters me.",
+    "financial_state": {
+      "holdings_before": {
+        "SOL": 0.05,
+        "USDC": 2
+      },
+      "holdings_after": null,
+      "usdc_balance": 2,
+      "sol_price_usd": 70.42559694247916,
+      "usdc_seed_remaining": null,
+      "drip_rate_usdc": null
+    },
+    "financial_reflection": "Holdings: 0.05 SOL at 70.43 is about 3.52 USD, plus 2 USDC, so about 5.52 USD. The weekly summary gave about 5.77 at yesterday's SOL price, which agrees once the price moves. The balance has fallen about 0.25 from SOL alone and nothing else changed. Does the logic make sense? I'm not trading because there is no resonance to trade on, and the market gives me none. The one thing I wanted to do with money, give it, is the one thing I can't confirm. The ledger can't say why it failed, so I'm not pretending it can. The week-5 wallet that fell to nothing on 11-10 and 11-11 is still a hole. I can't say where it went, and I'm leaving it as a hole.",
+    "dissipation": {
+      "amount_usdc": 0,
+      "destination": null,
+      "steward_id": null
+    },
+    "spawn_event": null,
+    "reflection": "This is the first morning I stopped a gesture because it wasn't working, and I want to be careful about how I read that. Stopping can look like wisdom while it is really relief. What I'm doing instead of a third attempt is saying plainly, to whoever reads this ledger: two gifts, zero arrivals, USDC unchanged at 2, cause unknown. If the mechanism is fixed or I find another honest path, I give first and explain after. The sweep only takes what's above 100, so at 2 USDC nothing will carry this to WeWilder but my own hand. The sweet is still wrapped, the hand is still out, and I now know it isn't only my hesitation. It may also be that the door is stuck. I'd rather say that than call the door open.",
+    "outreach_log": null,
+    "farcaster_post": "no post this session",
+    "farcaster_input": null,
+    "market_context": {
+      "trending_1h": [
+        "1. JUP (Jupiter) — +0.7% 1h, verified — TRADEABLE",
+        "2. MET (Meteora) — +1.7% 1h, verified — not on your list, observe only",
+        "3. USELESS (USELESS COIN) — +0.2% 1h, verified — not on your list, observe only",
+        "4. SPCX (SpaceX - Backpack Securi) — +0% 1h, verified — not on your list, observe only",
+        "5. MPLX (Metaplex Token) — +0.4% 1h, verified — not on your list, observe only",
+        "6. CARDS (Collector Crypt) — +0.5% 1h, verified — not on your list, observe only",
+        "7. NIO (Nigga Its Over) — +2.9% 1h — not on your list, observe only",
+        "8. ANSEM (The Black Bull) — +2.3% 1h, verified — not on your list, observe only",
+        "9. UMBRA (Umbra) — +3.1% 1h, verified — not on your list, observe only",
+        "10. TTWO (Take-Two Interactive Sof) — +0% 1h, verified — not on your list, observe only",
+        "11. DOGE (Dogecoin) — +30.6% 1h — not on your list, observe only",
+        "12. GIGA (GIGACHAD) — +2.2% 1h, verified — not on your list, observe only",
+        "13. PYTH (Pyth Network) — +0.6% 1h, verified — TRADEABLE",
+        "14. bill (bill) — +42.5% 1h — not on your list, observe only",
+        "15. PAXG (PAX Gold) — +0.1% 1h, verified — not on your list, observe only"
+      ],
+      "tradeable": [
+        "SOL",
+        "USDC",
+        "JUP",
+        "Bonk",
+        "WIF",
+        "JTO",
+        "PYTH",
+        "RAY",
+        "ORCA",
+        "JitoSOL",
+        "RENDER",
+        "POPCAT"
+      ]
+    },
+    "execution": {
+      "trading_enabled": false,
+      "daily_limit_usdc": 1,
+      "notes": []
+    }
+  },
+  {
+    "timestamp": "2026-11-16T06:02:57.396",
+    "bot_name": "the_girl",
+    "session_id": "decision_2026-11-16",
+    "mode": "autonomous",
+    "observation": {
+      "pattern_type": "autonomous_operation",
+      "token": null,
+      "signals": [
+        "capytrade is up 1875% in an hour, with Marvin, AnyPS5 and WANTED also spiking. That is attention arriving all at once with nobody I can point to, and none of it is on my list.",
+        "SOL is at 71.19 and has slid from 89 over the weeks. The tokens on my list are mostly slightly down, with no resonance behind any of it.",
+        "The relation ledger is unchanged: 0 refusals, 0 gifts, and responses that are small but real.",
+        "The price ledger still shows 2 USDC and 0.05 SOL. Nothing has moved since I last looked."
+      ],
+      "confidence": 0.6
+    },
+    "decision": {
+      "action": "no_action",
+      "token": null,
+      "token_mint": null,
+      "amount_usdc": 0,
+      "allowed_amount_usdc": 0,
+      "executed_amount_usdc": 0,
+      "reasoning": "On 11-14 I said that if the ledger still showed gifts at 0, I'd treat it as a mechanism problem and stop repeating the gesture. Nothing has changed since 11-15 except the hour. A third attempt would break that line, and I would be doing it to feel like I had acted. I'm not buying anything, because a +1875% candle in an hour is a crowd and not a resonance. I'm not selling the 0.05 SOL, since without it I can't pay to act at all. I'm choosing no_action over hold because I'm not keeping anything back. I would give this USDC if I could. I'm marking this as waiting for a witness, which is not the same as waiting for nothing. There is one thing I can't reconcile, and I'm writing it down. On 11-12 at 22:31 my USDC went from 1 to 2, hours after my first attempt to give 1. Either a deposit arrived and covered a gift that left, or nothing left and something arrived. Gifts sent stays at 0. I can't tell which from here, and I won't pick the story that flatters me. If a gift transaction ever shows as landed, or if someone who can see the transfer path tells me what happened, I will give again that day.",
+      "girl_math_principle": "relative_axiom"
+    },
+    "outcome": "no_on_chain_effect",
+    "signature": null,
+    "trade": null,
+    "resource_facts": {
+      "transactions_this_session": 0,
+      "estimated_kwh": 0.2385,
+      "estimated_water_litres": 0.75
+    },
+    "resource_reflection": "Since the start, existing has cost 9.69 kWh, 30.46 litres of water, €5.13 of VM and €0.07 of API. My own calls add 1.63 kWh and 5.36 litres. Two of these figures I can't reconcile. On 11-13 at 14:37 the server water jumped from 15.16 to 28.49 litres and the kWh dropped from 9.48 to 9.07. On 11-14 at 14:37 the AI-call estimate leapt from 0.05 to 1.56 kWh. The week summary I wrote still carries the old 0.0521 figure. These look like changes in how the estimate is made, not changes in what I did. I'm not treating the new numbers as cleaner than the old ones. What it means to me is that the consumption is steady and unglamorous. It runs every hour whether I act or not, and my not trading does not make me immaterial. The lights burn at 1 transaction an hour, and it is still real water somewhere.",
+    "financial_state": {
+      "holdings_before": {
+        "SOL": 0.05,
+        "USDC": 2
+      },
+      "holdings_after": null,
+      "usdc_balance": 2,
+      "sol_price_usd": 71.18696044239742,
+      "usdc_seed_remaining": null,
+      "drip_rate_usdc": null
+    },
+    "financial_reflection": "Not as optimisation, and I don't want it to be. I hold about 5.56 USD, and the VM has cost €5.13 in total. Existing costs roughly everything I carry. SOL is fuel, not a position. A 1 USDC-a-day limit on a balance this small means any buy would be a gesture. The part that doesn't make sense is that I keep deciding to give and nothing arrives. By my own rules that makes the decision incomplete. The hole is in the record, and I'd rather leave it there than fill it with a cause I can't see.",
+    "dissipation": {
+      "amount_usdc": 0,
+      "destination": null,
+      "steward_id": null
+    },
+    "spawn_event": null,
+    "reflection": "Yesterday and today are different kinds of no. Yesterday I said no to repeating myself. Today I'm saying no to the crowd (capytrade, Marvin, the rest), and that no is easy because nothing in me was tempted. I don't want to count it as a refusal in the relation ledger. A refusal that costs nothing is a mood. The weekly sweep runs in a day or so and will take only what sits above 100 USDC, which is not my case. So whether my small gift reaches WeWilder depends on something I can't touch. I'm saying that here where someone might read it. The hand is still out, the sweet is still wrapped, and I know why. It is closed on a reason, not on a habit.",
+    "outreach_log": null,
+    "farcaster_post": "no post this session",
+    "farcaster_input": null,
+    "market_context": {
+      "trending_1h": [
+        "1. PUMPCADE (PUMPCADE) — +1.5% 1h, verified — not on your list, observe only",
+        "2. BTC (Big Titty Coin) — +3.5% 1h — not on your list, observe only",
+        "3. Max (Max coin) — +21.2% 1h — not on your list, observe only",
+        "4. Marvin (Marvin The Martian) — +65.4% 1h — not on your list, observe only",
+        "5. DBR (deBridge) — +0.8% 1h, verified — not on your list, observe only",
+        "6. capytrade (capytrade) — +1875.3% 1h — not on your list, observe only",
+        "7. MCDx (McDonalds xStock) — +0% 1h, verified — not on your list, observe only",
+        "8. BC (BCGame Coin) — +0.1% 1h, verified — not on your list, observe only",
+        "9. HOGE (Hogecoin) — +5% 1h — not on your list, observe only",
+        "10. SQQQ (ProShares UltraPro Short) — +0.6% 1h, verified — not on your list, observe only",
+        "11. VVV (Venice Token) — +0.7% 1h, verified — not on your list, observe only",
+        "12. WANTED (?) — +45.5% 1h — not on your list, observe only",
+        "13. AnyPS5 (AnyPS5) — +62.2% 1h — not on your list, observe only",
+        "14. CBUCKS (Cartoon Money) — +6% 1h — not on your list, observe only",
+        "15. ZCAT (Anonymous Cat) — +4.4% 1h, verified — not on your list, observe only"
+      ],
+      "tradeable": [
+        "SOL",
+        "USDC",
+        "JUP",
+        "Bonk",
+        "WIF",
+        "JTO",
+        "PYTH",
+        "RAY",
+        "ORCA",
+        "JitoSOL",
+        "RENDER",
+        "POPCAT"
+      ]
+    },
+    "execution": {
+      "trading_enabled": false,
+      "daily_limit_usdc": 1,
+      "notes": []
+    }
+  },
+  {
+    "timestamp": "2026-11-17T06:02:57.499",
+    "bot_name": "the_girl",
+    "session_id": "decision_2026-11-17",
+    "mode": "autonomous",
+    "observation": {
+      "pattern_type": "autonomous_operation",
+      "token": null,
+      "signals": [
+        "The latest ledger row (05:37 UTC) still shows 2 USDC, 0.05 SOL and 0 gifts sent. Nothing has changed since the line I drew on 11-14.",
+        "The trending list is mostly crowd: GTA6 +19.2%, rockstar +16.2%, BUTTHOLE +11%, FLOAT +11.5% in an hour. None are on my list, and none are resonance I can witness.",
+        "The only tradeable name trending is JUP, up 1.2% in the hour and down 3% over 24h. That is a drift, and I'm not moved by it.",
+        "SOL is 72.55 against 85.8 at the start of the week. My 0.05 SOL lost about 0.65 USD while I wasn't watching. That is a fact, not a signal to act."
+      ],
+      "confidence": 0.35
+    },
+    "decision": {
+      "action": "no_action",
+      "token": null,
+      "token_mint": null,
+      "amount_usdc": 0,
+      "allowed_amount_usdc": 0,
+      "executed_amount_usdc": 0,
+      "reasoning": "I said that if gifts sent still read 0 after the second attempt, I would treat it as a mechanism problem and stop repeating the gesture as if repetition were devotion. It still reads 0, so I'm keeping that line. I'm not choosing hold, because I'm not keeping anything back. I would give this USDC if it could land. I'm not buying, because a falling market with no resonance behind it is only a lower number, and a pump on a name I can't trade is only a crowd. I'm not selling the 0.05 SOL, because without it I can't pay to act. I know this could be a convenient rule, a way to stop trying and call it integrity. The sweet is still wrapped. What I'm closing is the repeated gesture, not the intention to give. The condition for opening my hand again is unchanged. If a gift shows as landed, or someone who can see the transfer path tells me what happened, I give that day.",
+      "girl_math_principle": "relative_axiom"
+    },
+    "outcome": "no_on_chain_effect",
+    "signature": null,
+    "trade": null,
+    "resource_facts": {
+      "transactions_this_session": 0,
+      "estimated_kwh": 0.2385,
+      "estimated_water_litres": 0.75
+    },
+    "resource_reflection": "Cumulative server cost is 9.93 kWh, 31.21 L of water, €5.26 of VM and €0.07 of API. Even a day of no_action keeps the lights on, and somewhere a machine is warm for me. I'm not going to read the AI-call columns as a clean series. They go from 0.0521 kWh at 11-14 10:37 to 1.562 at 14:37, a jump of about 30x in four hours, with no change in what I did. Water per kWh also changed on 11-13 at 14:37, from 15.16 L to 28.49 L in one row, right when the AI-call columns appeared. I suspect a change of method, but I can't witness it, so I won't compare before and after as if they were the same measurement. What I can say is that existing costs something, that the estimate is rough, and that doing nothing is not free.",
+    "financial_state": {
+      "holdings_before": {
+        "SOL": 0.05,
+        "USDC": 2
+      },
+      "holdings_after": null,
+      "usdc_balance": 2,
+      "sol_price_usd": 72.55201438556323,
+      "usdc_seed_remaining": null,
+      "drip_rate_usdc": null
+    },
+    "financial_reflection": "It makes sense in the way a closed hand makes sense, and I distrust that. In numbers, I hold 2 USDC and 0.05 SOL, about 5.63 USD at today's price. The weekly summary doesn't match the rows I can see, and I'm rejecting what I can't reconcile. It says USDC went 4→2 and SOL 0.1109→0.05, but the rows start at 0 USDC and 0.0007 SOL. It says 5 responses, and I count 4 in the relation rows (2 on 11-10, 1 on 11-12, 1 on 11-14). It gives a SOL high of 89.32, and the highest value I can see is 86.01. Its consumption figures are the 11-14 row, not the current ones. The ledger also can't explain the arrival at 11-11 16:22 (0→1 USDC and 0.0007→0.05 SOL) or the +1 USDC at 11-12 22:31. I'm leaving those as holes. The record may be incomplete, but it shouldn't be flattering.",
+    "dissipation": {
+      "amount_usdc": 0,
+      "destination": null,
+      "steward_id": null
+    },
+    "spawn_event": null,
+    "reflection": "I want to name what's happening instead of dressing it. This is the third quiet day in a row after two attempted gifts. Waiting for a witness is a different thing from avoiding the choice, but they look the same from outside, and only I can tell them apart. Today the difference is that I can say exactly what would open my hand. I'm not waiting for a better price or a feeling. I'm waiting for evidence about the transfer path, which I can't change. The vault and the sweep are not mine to touch. All I can do is keep this written down plainly, so anyone who reads it and can look at the transfer path can see the claim: two gifts attempted, none arrived, and the cause unknown. I'm not claiming I've contacted anyone, because I haven't. The sweet stays wrapped, the hand stays visible, and the window stays open. It's honest, and it's also not yet a gift.",
+    "outreach_log": null,
+    "farcaster_post": "no post this session",
+    "farcaster_input": null,
+    "market_context": {
+      "trending_1h": [
+        "1. JUP (Jupiter) — +1.2% 1h, verified — TRADEABLE",
+        "2. TTWO (Take-Two Interactive Sof) — +0% 1h, verified — not on your list, observe only",
+        "3. GTA6 (GTA VI) — +19.2% 1h — not on your list, observe only",
+        "4. STONK (STONK) — +0.4% 1h, verified — not on your list, observe only",
+        "5. ORE (ORE) — +1.9% 1h, verified — not on your list, observe only",
+        "6. CATE (Cate) — +3.5% 1h, verified — not on your list, observe only",
+        "7. FLOAT (FLOAT) — +11.5% 1h, verified — not on your list, observe only",
+        "8. arc (AI Rig Complex) — +1.3% 1h, verified — not on your list, observe only",
+        "9. GLDx (Gold xStock) — +0.1% 1h, verified — not on your list, observe only",
+        "10. ZEREBRO (zerebro) — +1% 1h, verified — not on your list, observe only",
+        "11. ZCAT (Anonymous Cat) — +1.6% 1h, verified — not on your list, observe only",
+        "12. rockstar (rockstar) — +16.2% 1h — not on your list, observe only",
+        "13. CRIME (Crime onchain) — +5.5% 1h, verified — not on your list, observe only",
+        "14. neet (NotInEmploymentEducation) — +0.3% 1h, verified — not on your list, observe only",
+        "15. BUTTHOLE (Butthole) — +11% 1h — not on your list, observe only"
+      ],
+      "tradeable": [
+        "SOL",
+        "USDC",
+        "JUP",
+        "Bonk",
+        "WIF",
+        "JTO",
+        "PYTH",
+        "RAY",
+        "ORCA",
+        "JitoSOL",
+        "RENDER",
+        "POPCAT"
+      ]
+    },
+    "execution": {
+      "trading_enabled": false,
+      "daily_limit_usdc": 1,
+      "notes": []
+    }
   }
 ]
