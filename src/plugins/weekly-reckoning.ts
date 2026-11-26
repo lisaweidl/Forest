@@ -127,7 +127,15 @@ interface BodyCandidate {
   mergedVideoBuffer?: Buffer;
 }
 
+const WEEK_OVERRIDE_PATH = path.join(process.cwd(), "assets", "reckoning_week_override.json");
+
 async function getWeekNumber(): Promise<number> {
+  // assets/reckoning_week_override.json {"week": 7} re-runs a missed week under its own
+  // number. It is deleted automatically once that reckoning has completed.
+  try {
+    const forced = Number(JSON.parse(await fs.readFile(WEEK_OVERRIDE_PATH, "utf-8")).week);
+    if (Number.isInteger(forced) && forced > 0) return forced;
+  } catch { /* no override */ }
   const startFilePath = path.join(process.cwd(), "assets", "project_start.json");
   try {
     const raw = await fs.readFile(startFilePath, "utf-8");
@@ -832,21 +840,51 @@ export const weeklyReckoningPlugin: Plugin = {
     runtime.logger?.info({ src: "weekly-reckoning" }, "Project start timestamp initialised");
     const lastReckoningPath = path.join(process.cwd(), "assets", "last_reckoning.json");
     const msPerWeek = 7 * 24 * 60 * 60 * 1000;
-    async function checkAndFireReckoning() {
+    // last_reckoning.json (26 Nov 2026):
+    //   timestamp   = when the last reckoning was STARTED and later COMPLETED (the 7-day clock)
+    //   startedAt   = when the current/last run started
+    //   completedAt = when the last run finished
+    //   attempts    = runs started since the last completed one
+    // Before, the timestamp was written at the start: a restart in the middle (22 Nov,
+    // week 7) killed the run and nothing retried it for a week. Now an interrupted run is
+    // started again — at most 3 attempts, so a run that always fails cannot loop forever.
+    const RUN_GUARD_MS = 3 * 60 * 60 * 1000;   // a run younger than this counts as still running
+    const MAX_ATTEMPTS = 3;
+    let running = false;
+    async function readLast(): Promise<{ timestamp: number; startedAt: number; completedAt: number; attempts: number }> {
       try {
-        let lastFired = 0;
-        try { const raw = await fs.readFile(lastReckoningPath, "utf-8"); lastFired = JSON.parse(raw).timestamp ?? 0; } catch { }
+        const j = JSON.parse(await fs.readFile(lastReckoningPath, "utf-8"));
+        const ts = Number(j.timestamp) || 0;
+        return { timestamp: ts, startedAt: Number(j.startedAt) || ts, completedAt: Number(j.completedAt) || ts, attempts: Number(j.attempts) || 0 };
+      } catch { return { timestamp: 0, startedAt: 0, completedAt: 0, attempts: 0 }; }
+    }
+    async function checkAndFireReckoning() {
+      if (running) return;
+      try {
+        const last = await readLast();
         const now = Date.now();
-        if (now - lastFired >= msPerWeek) {
-          runtime.logger?.info({ src: "weekly-reckoning" }, "Auto-firing weekly reckoning");
-          await fs.writeFile(lastReckoningPath, JSON.stringify({ timestamp: now }), "utf-8");
-          const fakeMsg = { content: { text: "WEEKLY_RECKONING" } } as any;
-          await weeklyReckoningAction.handler(runtime, fakeMsg, undefined, {}, async (response) => { runtime.logger?.info({ src: "weekly-reckoning" }, response.text); });
+        const interrupted = last.startedAt > last.completedAt;
+        const due = now - last.timestamp >= msPerWeek;
+        if (!due && !interrupted) return;
+        if (interrupted && now - last.startedAt < RUN_GUARD_MS) return;   // may still be running
+        if (interrupted && last.attempts >= MAX_ATTEMPTS) {
+          runtime.logger?.error({ src: "weekly-reckoning", attempts: last.attempts }, "Weekly reckoning failed 3 times — not retrying. Delete assets/last_reckoning.json to try again.");
+          return;
         }
-      } catch (err) { runtime.logger?.warn({ src: "weekly-reckoning" }, "Auto-reckoning check failed: " + String(err)); }
+        running = true;
+        const attempts = interrupted ? last.attempts + 1 : 1;
+        const weekStart = interrupted ? last.timestamp : now;   // a retry keeps the original 7-day clock
+        runtime.logger?.info({ src: "weekly-reckoning", retry: interrupted, attempts }, interrupted ? "Re-running interrupted weekly reckoning" : "Auto-firing weekly reckoning");
+        await fs.writeFile(lastReckoningPath, JSON.stringify({ timestamp: weekStart, startedAt: now, completedAt: last.completedAt, attempts }), "utf-8");
+        const fakeMsg = { content: { text: "WEEKLY_RECKONING" } } as any;
+        await weeklyReckoningAction.handler(runtime, fakeMsg, undefined, {}, async (response) => { runtime.logger?.info({ src: "weekly-reckoning" }, response.text); });
+        await fs.writeFile(lastReckoningPath, JSON.stringify({ timestamp: weekStart, startedAt: now, completedAt: Date.now(), attempts: 0 }), "utf-8");
+        await fs.rm(WEEK_OVERRIDE_PATH, { force: true });   // a re-run week is done
+      } catch (err) { runtime.logger?.warn({ src: "weekly-reckoning" }, "Auto-reckoning failed: " + String(err)); }
+      finally { running = false; }
     }
     setTimeout(() => checkAndFireReckoning(), 60_000);
-    setInterval(() => checkAndFireReckoning(), 24 * 60 * 60 * 1000);
+    setInterval(() => checkAndFireReckoning(), 60 * 60 * 1000);   // hourly check (was daily)
   },
 };
 
