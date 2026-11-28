@@ -83,7 +83,7 @@ const APPROVED_PROGRAMS = new Set<string>([
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",    // Token-2022
   "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",   // Associated Token Account
   "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",    // Jupiter Aggregator v6
-  "61DFfeTKM7trxYcPQCM78bJ794ddZprZpAwAnESmms1",    // Jupiter Order Engine (RFQ)
+  "61DFfeTKM7trxYcPQCM78bJ794ddZprZpAwAnLiwTpYH",    // Jupiter Z order engine (RFQ)
   "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",    // Memo
   "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo",    // Memo (v1)
   ...String(process.env.TRADING_EXTRA_PROGRAMS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
@@ -310,14 +310,15 @@ async function settle(connection: Connection, signature: string, blockhash: stri
   return { status: "unknown", signature, feeLamports: null, detail: `no final status after ${STATUS_WAIT_MS / 1000} s` };
 }
 
-// Balances of her accounts: lamports of the wallet, token amount (raw) of token accounts.
+// Balances of her accounts: lamports for the wallet and her wrapped-SOL account (index 0
+// and 2 — rent locked in a new wSOL account is still hers), raw token amount otherwise.
 async function snapshotAccounts(connection: Connection, addrs: PublicKey[]): Promise<Map<string, bigint | null>> {
   const infos = await connection.getMultipleAccountsInfo(addrs, "confirmed");
   const m = new Map<string, bigint | null>();
   addrs.forEach((a, i) => {
     const info = infos[i];
     if (!info) m.set(a.toBase58(), null);
-    else if (i === 0) m.set(a.toBase58(), BigInt(info.lamports));
+    else if (i === 0 || i === 2) m.set(a.toBase58(), BigInt(info.lamports));
     else m.set(a.toBase58(), info.data.length >= 72 ? u64(info.data, 64) : null);
   });
   return m;
@@ -390,21 +391,19 @@ async function inspectSwap(
   (sim.value.accounts ?? []).forEach((a, i) => {
     const addr = watch[i].toBase58();
     if (!a) after.set(addr, null);
-    else if (i === 0) after.set(addr, BigInt(a.lamports));
+    else if (i === 0 || i === 2) after.set(addr, BigInt(a.lamports));
     else { const raw = Buffer.from((a.data as string[])[0], "base64"); after.set(addr, raw.length >= 72 ? u64(raw, 64) : null); }
   });
   const delta = (addr: string) => (after.get(addr) ?? 0n) - (before.get(addr) ?? 0n);
-  const dSol = delta(me), dUsdc = delta(usdcAta);
-  for (const a of watch.slice(2)) {
-    const addr = a.toBase58();
-    if (addr === usdcAta) continue;
-    if (delta(addr) < 0n && !(addr === wsolAta && intent.inputMint === SOL_MINT)) throw new Anomaly(`simulation: balance of her account ${addr} would drop`);
+  const dSol = delta(me) + delta(wsolAta);   // her SOL in total: wallet + wrapped
+  const dUsdc = delta(usdcAta);
+  for (const a of watch.slice(3)) {
+    if (delta(a.toBase58()) < 0n) throw new Anomaly(`simulation: balance of her account ${a.toBase58()} would drop`);
   }
   const value = intent.inUsd * MIN_VALUE_RETURNED;
   if (intent.inputMint === USDC_MINT) {
     if (-dUsdc > intent.inAmountRaw) throw new Anomaly(`simulation: ${Number(-dUsdc) / 1e6} USDC would leave, intended ${Number(intent.inAmountRaw) / 1e6}`);
-    const wsolGain = delta(wsolAta) > 0n ? delta(wsolAta) : 0n;   // output may stay wrapped
-    const solGotUsd = (Number(dSol + wsolGain) + fee) / 1e9 * intent.solPrice;
+    const solGotUsd = (Number(dSol) + fee) / 1e9 * intent.solPrice;
     if (solGotUsd < value) throw new Anomaly(`simulation: only ≈${round(solGotUsd, 3)} USD of SOL would come back for ${round(intent.inUsd, 3)} USD`);
   } else {
     if (-dSol > intent.inAmountRaw + BigInt(SOL_IN_MARGIN_LAMPORTS)) throw new Anomaly(`simulation: ${Number(-dSol) / 1e9} SOL would leave, intended ${Number(intent.inAmountRaw) / 1e9}`);
