@@ -13,6 +13,10 @@
  *      (at least 0.01 SOL / 1 USDC) and no known transaction happened in the last
  *      15 minutes → alert.
  *
+ * On either alert it also sets the trading stop (assets/trading_halt.json, see
+ * alerts.ts): trades and gifts halt until a human removes the file; the sweep goes on.
+ * (transaction_rules.md v2: "I stop and alert my human operator privately on Telegram.")
+ *
  * It cannot stop a transfer — whoever has the key can send. It buys time.
  * No Claude calls; a few Solana RPC requests per round.
  *
@@ -28,11 +32,13 @@ import { type IAgentRuntime, type Plugin } from "@elizaos/core";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Connection, PublicKey } from "@solana/web3.js";
+import { haltTrading } from "./alerts";
 
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const STATE_PATH = path.join(process.cwd(), "assets", "watchdog_state.json");
 const DECISION_LOG_DIR = path.join(process.cwd(), "alambic", "decision_log");
 const LAST_SWEEP_PATH = path.join(process.cwd(), "assets", "last_sweep.json");
+const PENDING_PATH = path.join(process.cwd(), "assets", "pending_transaction.json");
 const INTERVAL_MS = 5 * 60 * 1000;
 const SETTLE_MS = 5 * 60 * 1000;
 const KNOWN_WINDOW_MS = 15 * 60 * 1000;
@@ -78,6 +84,10 @@ async function knownTransactions(): Promise<{ sigs: Set<string>; lastAt: number 
     const s = JSON.parse(await fs.readFile(LAST_SWEEP_PATH, "utf-8"));
     if (s?.signature) { sigs.add(s.signature); lastAt = Math.max(lastAt, Number(s.timestamp) || 0); }
   } catch { /* no sweep yet */ }
+  try {   // a transaction the decision cycle is sending right now
+    const p = JSON.parse(await fs.readFile(PENDING_PATH, "utf-8"));
+    if (p?.signature) { sigs.add(p.signature); lastAt = Math.max(lastAt, Date.parse(p.at) || 0); }
+  } catch { /* nothing in flight */ }
   return { sigs, lastAt };
 }
 
@@ -147,10 +157,11 @@ export async function watchOnce(runtime: IAgentRuntime): Promise<void> {
         ...Object.entries(d.tokens as Record<string, number>).filter(([, v]) => v < 0).map(([m, v]) => `${fmt(-v)} ${m === USDC_MINT ? "USDC" : short(m)} out`),
       ].filter(Boolean).join(", ") || "no balance change (fees only)";
       state.alerted.push(s.signature);
+      haltTrading(`unknown transaction signed with her key: ${s.signature}`, "wallet-watchdog");
       await sendAlert(runtime,
         `⚠️ The Girl — unknown transaction signed with her key\n${moved}\n` +
         (d.receivers.length ? `to: ${d.receivers.slice(0, 3).map(short).join(", ")}\n` : "") +
-        `https://solscan.io/tx/${s.signature}\n\nNot in her Decision Log or sweep. If this wasn't you: stop the agent (pm2 stop the-girl), send no more top-ups, check the server.`);
+        `https://solscan.io/tx/${s.signature}\n\nNot in her Decision Log or sweep. Trading is stopped (sweep continues). If this wasn't you: stop the agent (pm2 stop the-girl), send no more top-ups, check the server.\nTo resume after checking: rm /root/the-girl/assets/trading_halt.json`);
     }
   }
 
@@ -160,9 +171,10 @@ export async function watchOnce(runtime: IAgentRuntime): Promise<void> {
     const solDrop = state.last.sol - now.sol, usdcDrop = state.last.usdc - now.usdc;
     const big = (solDrop >= 0.01 && solDrop >= state.last.sol * DROP_SHARE) || (usdcDrop >= 1 && usdcDrop >= state.last.usdc * DROP_SHARE);
     if (big && Date.now() - known.lastAt > KNOWN_WINDOW_MS) {
+      haltTrading(`balance dropped: SOL ${fmt(state.last.sol)} → ${fmt(now.sol)}, USDC ${fmt(state.last.usdc)} → ${fmt(now.usdc)}`, "wallet-watchdog");
       await sendAlert(runtime,
         `⚠️ The Girl — balance dropped since the last check\nSOL ${fmt(state.last.sol)} → ${fmt(now.sol)}\nUSDC ${fmt(state.last.usdc)} → ${fmt(now.usdc)}\n` +
-        `No own decision or sweep in the last 15 minutes.\nhttps://solscan.io/account/${ownerStr}`);
+        `No own decision or sweep in the last 15 minutes. Trading is stopped (sweep continues).\nhttps://solscan.io/account/${ownerStr}\nTo resume after checking: rm /root/the-girl/assets/trading_halt.json`);
     }
   }
   state.last = { ...now, at: Date.now() };

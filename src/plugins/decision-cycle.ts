@@ -1,34 +1,38 @@
 /**
  * decision-cycle.ts
  *
- * Custom ElizaOS plugin for The Girl Protocol (rewritten 11 Nov 2026).
+ * Custom ElizaOS plugin for The Girl Protocol (rewritten 11 Nov 2026, rules v2 28 Nov 2026).
  *
  * Once a day at 07:00 Europe/Vienna The Girl decides — on her own — whether to buy,
- * sell, hold or give (dissipate to WeWilder). She sees her SOUL, ledgers, history,
- * her holdings, the prices of the tokens she may trade, and Jupiter's trending list
- * as a market signal. She writes a Decision Log entry (schema v4). Only then does
- * the code execute — through hard, deterministic checks.
+ * sell, hold or give (dissipate to WeWilder). She sees her SOUL, her girl math
+ * principles and her transaction rules (knowledge/girl_math_principles.md,
+ * knowledge/transaction_rules.md), ledgers, history, holdings, SOL's price and
+ * Jupiter's trending list as a market mood. She writes a Decision Log entry (v4).
+ * Only then does the code execute — through hard, deterministic checks that follow
+ * knowledge/transaction_rules.md v2:
  *
- * WHAT SHE MAY TRADE: only the fixed ALLOWLIST below. Trending tokens are shown as
- * a signal; she can name them in her reasoning but cannot buy them unless they are
- * on the list. Every allowlisted mint is checked against Jupiter's token data at
- * run time (symbol must match, token must be verified) — a typo or a changed token
- * drops out instead of being traded.
- *
- * HARD LIMITS (code, not model):
- *   - TRADING_ENABLED=true required, otherwise dry run (decides and logs only).
- *   - At most TRADING_MAX_USDC_PER_DAY (default 5, never more than 5) per day.
- *   - Buy = USDC -> allowlisted token. Sell = allowlisted token -> USDC.
- *     Dissipate = USDC -> WEWILDER_ADDRESS only.
- *   - Refused if: price impact > 1%, slippage > 3%, or the quote returns less than
- *     90% of the value put in (fees + impact), or no SOL for fees (unless gasless).
- *   - Keeps 0.02 SOL when selling SOL. Ignores amounts under 0.50 USDC.
- *   - One decision per day, triggered only by this clock — never by a message.
- *   - Token names from the trending list are sanitised before she sees them.
+ *   WHAT SHE MAY SIGN: SOL<->USDC swaps through Jupiter, USDC transfers to WeWilder.
+ *   LIMITS: TRADING_ENABLED=true or nothing executes; at most 5 USDC a day (trades and
+ *     gifts together); no move under 0.50 USDC; price impact <= 1 %, slippage <= 3 %,
+ *     >= 90 % of the value back; network fee <= 0.001 SOL; 0.02 SOL kept for fees.
+ *   BEFORE SIGNING (swaps): the quote must be fresh (< 45 s) and match the intention;
+ *     every top-level program must be on the approved list; no Approve / SetAuthority,
+ *     no transfers out of her accounts except small fee-sized ones (counted as fee),
+ *     no account closed to someone else; the transaction is simulated and her
+ *     balances must change as intended — only the input token goes down, by no more
+ *     than intended, and >= 90 % of the value comes back. Gifts are simulated too.
+ *   AFTER SENDING: the on-chain status decides — confirmed: recorded once and
+ *     balances re-read; definitely failed: fee recorded, retry at the earliest next
+ *     morning; pending / unknown / inconsistent: STOP + private alert.
+ *   STOP: assets/trading_halt.json (see alerts.ts). While it exists she still decides
+ *     and logs, but nothing executes. Set by: anomalies before signing, unknown status,
+ *     the wallet watchdog, a transaction left in flight by a restart. Only a human
+ *     removes it. The sweep (jupiter-trading.ts) is not affected.
+ *   One decision per day, triggered only by this clock — never by a message.
  *
  * Jupiter: Swap API V2 (/order + /execute), Tokens API V2, Price API V3 on api.jup.ag.
- * JUPITER_API_KEY is optional; without it, keyless access (0.5 req/s) is used and
- * requests are spaced accordingly.
+ * JUPITER_API_KEY is optional. TRADING_EXTRA_PROGRAMS (comma-separated program ids)
+ * adds programs to the approved list — check them first with test-trade-check.ts.
  */
 
 import { type IAgentRuntime, type Plugin, ModelType } from "@elizaos/core";
@@ -45,23 +49,14 @@ import {
 } from "@solana/web3.js";
 import bs58 from "bs58";
 import { recentLedgerText, readWeeklySummaries } from "./history";
+import { tradingHalt, haltAndAlert } from "./alerts";
 
-// ── allowlist: the only tokens she may trade. Edit here. ──────────────────────
+// ── allowlist: the only tokens she may trade. ─────────────────────────────────
 // mint -> expected symbol (checked against Jupiter's token data at run time; "A|B" = either, "$" ignored)
 const ALLOWLIST: Record<string, string> = {
   So11111111111111111111111111111111111111112: "SOL",
   EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: "USDC",
-  JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN: "JUP",
-  DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263: "Bonk",
-  EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm: "WIF",       // listed as "$WIF"
-  jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL: "JTO",
-  HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3: "PYTH",
-  "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R": "RAY",
-  orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE: "ORCA",
-  J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn: "JitoSOL",
-  rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof: "RENDER|RNDR",
-  "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr": "POPCAT",
-};
+};   // transaction_rules.md v2: SOL and USDC only
 
 // ── config ────────────────────────────────────────────────────────────────────
 
@@ -74,6 +69,25 @@ const MIN_SOL_FOR_FEES = 0.003;
 const MAX_PRICE_IMPACT_PCT = 1;      // percentage points
 const MAX_SLIPPAGE_BPS = 300;        // 3%
 const MIN_VALUE_RETURNED = 0.9;      // out value must be >= 90% of in value
+const FEE_CAP_LAMPORTS = 1_000_000;  // 0.001 SOL network fee per transaction
+const ORDER_MAX_AGE_MS = 45_000;     // a quote older than this is stale
+const SOL_IN_MARGIN_LAMPORTS = 6_000_000; // selling SOL: fees + rent for temporary accounts on top of the amount
+const STATUS_WAIT_MS = 150_000;      // how long to wait for an on-chain status
+
+// Top-level programs a transaction may call. DEXes are reached through Jupiter (CPI)
+// and are covered by the simulation.
+const APPROVED_PROGRAMS = new Set<string>([
+  "ComputeBudget111111111111111111111111111111",
+  "11111111111111111111111111111111",               // System
+  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",    // SPL Token
+  "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",    // Token-2022
+  "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",   // Associated Token Account
+  "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",    // Jupiter Aggregator v6
+  "61DFfeTKM7trxYcPQCM78bJ794ddZprZpAwAnESmms1",    // Jupiter Order Engine (RFQ)
+  "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",    // Memo
+  "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo",    // Memo (v1)
+  ...String(process.env.TRADING_EXTRA_PROGRAMS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+]);
 
 const JUP = "https://api.jup.ag";
 const SOL_MINT = "So11111111111111111111111111111111111111112";
@@ -87,13 +101,17 @@ const FACTS_DIR = path.join(ROOT, "knowledge", "facts");
 const LOG_DIR = path.join(ROOT, "alambic", "decision_log");
 const PROJECT_START_PATH = path.join(ROOT, "assets", "project_start.json");
 const STATE_PATH = path.join(ROOT, "assets", "last_decision.json");
+const PENDING_PATH = path.join(ROOT, "assets", "pending_transaction.json");
+const GIRL_MATH_PATH = path.join(ROOT, "knowledge", "girl_math_principles.md");
+const RULES_PATH = path.join(ROOT, "knowledge", "transaction_rules.md");
+const TOKEN_2022_ID = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 type Action = "buy" | "sell" | "hold" | "dissipate" | "no_action";
 
 interface ModelDecision {
   observation: { pattern_type: string; token: string | null; signals: string[]; confidence: number };
-  decision: { action: Action; token?: string | null; amount_usdc: number; reasoning: string; girl_math_principle: string };
+  decision: { action: Action; token?: string | null; amount_usdc: number; reasoning: string; girl_math_principle: string; girl_math_rule?: string };
   resource_reflection: string;
   financial_reflection: string;
   reflection: string;
@@ -242,12 +260,171 @@ async function consumption24h(): Promise<{ kwh: number | null; water: number | n
 
 // ── execution ─────────────────────────────────────────────────────────────────
 
-interface SwapResult { signature: string; inAmount: string; outAmount: string; priceImpact: number; router: string; inUsd: number | null; outUsd: number | null }
+// An anomaly = the transaction does not match her intention or contains something
+// unapproved. Rule: reject, stop, alert. Other failures (RPC down, stale quote, limit
+// exceeded, simulation failing) only mean "not sent today".
+class Anomaly extends Error {}
 
-// Jupiter Swap V2: /order (quote + transaction), checks, sign, /execute.
-async function swapV2(keypair: Keypair, inputMint: string, outputMint: string, amountRaw: number, solBalance: number): Promise<SwapResult> {
+type Status = "executed" | "failed" | "unknown";
+interface Settled { status: Status; signature: string; feeLamports: number | null; detail: string }
+
+interface SwapResult {
+  status: Status; signature: string | null; detail: string;
+  inAmount: string; outAmount: string; priceImpact: number; router: string;
+  inUsd: number | null; outUsd: number | null; feeLamports: number | null; programs: string[];
+}
+
+const u64 = (b: Buffer | Uint8Array, off: number) => Buffer.from(b).readBigUInt64LE(off);
+
+function writePending(p: Record<string, unknown>): void {
+  fsSync.mkdirSync(path.dirname(PENDING_PATH), { recursive: true });
+  fsSync.writeFileSync(PENDING_PATH, JSON.stringify({ ...p, at: new Date().toISOString() }, null, 2));
+}
+function clearPending(): void { try { fsSync.rmSync(PENDING_PATH, { force: true }); } catch { /* fine */ } }
+
+// Waits for the on-chain status of a signature. Definitely failed = an error on chain,
+// or never landed and its blockhash has expired. Anything else after the wait = unknown.
+async function settle(connection: Connection, signature: string, blockhash: string): Promise<Settled> {
+  const started = Date.now();
+  while (Date.now() - started < STATUS_WAIT_MS) {
+    try {
+      const st = (await connection.getSignatureStatuses([signature], { searchTransactionHistory: true })).value[0];
+      if (st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized")) {
+        let fee: number | null = null;
+        try { fee = (await connection.getTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: "confirmed" }))?.meta?.fee ?? null; } catch { /* fee unknown */ }
+        if (st.err) return { status: "failed", signature, feeLamports: fee, detail: `failed on chain: ${JSON.stringify(st.err)}` };
+        return { status: "executed", signature, feeLamports: fee, detail: "confirmed" };
+      }
+      if (!st) {
+        const valid = await connection.isBlockhashValid(blockhash, { commitment: "confirmed" }).then((r) => r.value).catch(() => true);
+        if (!valid) {
+          // one last look: it could have landed just before expiry
+          const again = (await connection.getSignatureStatuses([signature], { searchTransactionHistory: true })).value[0];
+          if (!again) return { status: "failed", signature, feeLamports: 0, detail: "never landed, blockhash expired — no funds moved" };
+          continue;
+        }
+      }
+    } catch { /* RPC hiccup: keep waiting */ }
+    await sleep(3000);
+  }
+  return { status: "unknown", signature, feeLamports: null, detail: `no final status after ${STATUS_WAIT_MS / 1000} s` };
+}
+
+// Balances of her accounts: lamports of the wallet, token amount (raw) of token accounts.
+async function snapshotAccounts(connection: Connection, addrs: PublicKey[]): Promise<Map<string, bigint | null>> {
+  const infos = await connection.getMultipleAccountsInfo(addrs, "confirmed");
+  const m = new Map<string, bigint | null>();
+  addrs.forEach((a, i) => {
+    const info = infos[i];
+    if (!info) m.set(a.toBase58(), null);
+    else if (i === 0) m.set(a.toBase58(), BigInt(info.lamports));
+    else m.set(a.toBase58(), info.data.length >= 72 ? u64(info.data, 64) : null);
+  });
+  return m;
+}
+
+// Checks a Jupiter transaction against her intention before she signs it.
+async function inspectSwap(
+  connection: Connection, owner: PublicKey, vtx: VersionedTransaction, ownTokenAccounts: PublicKey[],
+  intent: { inputMint: string; outputMint: string; inAmountRaw: bigint; inUsd: number; solPrice: number; gasless: boolean },
+): Promise<{ feeLamports: number; programs: string[] }> {
+  const msg = vtx.message;
+  // resolve address lookup tables so every account is known
+  const alts = [];
+  for (const l of msg.addressTableLookups) {
+    const t = (await connection.getAddressLookupTable(l.accountKey)).value;
+    if (!t) throw new Error(`lookup table ${l.accountKey.toBase58()} unavailable — not sent`);
+    alts.push(t);
+  }
+  const keys = msg.getAccountKeys({ addressLookupTableAccounts: alts });
+  const key = (i: number) => keys.get(i)?.toBase58() ?? "?";
+  const me = owner.toBase58();
+  const usdcAta = ata(owner, new PublicKey(USDC_MINT)).toBase58();
+  const wsolAta = ata(owner, new PublicKey(SOL_MINT)).toBase58();
+  const mine = new Set([me, usdcAta, wsolAta, ...ownTokenAccounts.map((a) => a.toBase58())]);
+
+  let cuLimit = 200_000, cuPriceMicro = 0n, smallTransfers = 0n;
+  const programs: string[] = [];
+  for (const ix of msg.compiledInstructions) {
+    const prog = key(ix.programIdIndex);
+    programs.push(prog);
+    if (!APPROVED_PROGRAMS.has(prog)) throw new Anomaly(`unapproved program ${prog}`);
+    const d = Buffer.from(ix.data);
+    const acc = (n: number) => key(ix.accountKeyIndexes[n]);
+    if (prog === "ComputeBudget111111111111111111111111111111") {
+      if (d[0] === 2) cuLimit = d.readUInt32LE(1);
+      if (d[0] === 3) cuPriceMicro = u64(d, 1);
+    } else if (prog === "11111111111111111111111111111111") {
+      const kind = d.length >= 4 ? d.readUInt32LE(0) : -1;
+      if (kind === 2) {                                   // Transfer
+        const lamports = u64(d, 4);
+        if (acc(0) === me && acc(1) !== wsolAta) smallTransfers += lamports;  // tip / fee to someone else
+        else if (acc(0) !== me) throw new Anomaly("SOL transfer from an account that isn't hers");
+      } else if (kind !== 0 && kind !== 1 && kind !== 8) {  // CreateAccount, Assign, Allocate allowed
+        throw new Anomaly(`unexpected System instruction ${kind}`);
+      }
+    } else if (prog === TOKEN_PROGRAM_ID.toBase58() || prog === TOKEN_2022_ID.toBase58()) {
+      const op = d[0];
+      if (op === 4 || op === 13) throw new Anomaly("token Approve (delegate) in transaction");
+      if (op === 6) throw new Anomaly("token SetAuthority in transaction");
+      if (op === 9 && acc(1) !== me) throw new Anomaly(`token account closed to ${acc(1)}, not to her`);
+      if ((op === 3 || op === 12) && mine.has(acc(0)) && !mine.has(acc(op === 3 ? 1 : 2))) throw new Anomaly("token transfer out of her account at top level");
+      if (![1, 3, 5, 9, 12, 16, 17, 18].includes(op)) throw new Anomaly(`unexpected token instruction ${op}`);
+    } else if (prog === ATA_PROGRAM_ID.toBase58()) {
+      if (acc(2) !== me) throw new Anomaly(`token account created for ${acc(2)}, not for her`);
+    }
+  }
+
+  // network fee: signatures + priority fee (+ small transfers to others, counted as fee)
+  const priority = (cuPriceMicro * BigInt(cuLimit) + 999_999n) / 1_000_000n;
+  const payerIsHer = key(0) === me;
+  const fee = Number((payerIsHer ? BigInt(msg.header.numRequiredSignatures) * 5000n + priority : 0n) + smallTransfers);
+  if (fee > FEE_CAP_LAMPORTS) throw new Error(`network fee ${fee / 1e9} SOL > ${FEE_CAP_LAMPORTS / 1e9} SOL — not sent`);
+
+  // simulate and compare her balances
+  const watch = [owner, new PublicKey(usdcAta), new PublicKey(wsolAta), ...ownTokenAccounts.filter((a) => a.toBase58() !== usdcAta && a.toBase58() !== wsolAta)];
+  const before = await snapshotAccounts(connection, watch);
+  const sim = await connection.simulateTransaction(vtx, { sigVerify: false, replaceRecentBlockhash: true, commitment: "confirmed", accounts: { addresses: watch.map((a) => a.toBase58()), encoding: "base64" } });
+  if (sim.value.err) throw new Error(`simulation failed: ${JSON.stringify(sim.value.err)} — not sent`);
+  const after = new Map<string, bigint | null>();
+  (sim.value.accounts ?? []).forEach((a, i) => {
+    const addr = watch[i].toBase58();
+    if (!a) after.set(addr, null);
+    else if (i === 0) after.set(addr, BigInt(a.lamports));
+    else { const raw = Buffer.from((a.data as string[])[0], "base64"); after.set(addr, raw.length >= 72 ? u64(raw, 64) : null); }
+  });
+  const delta = (addr: string) => (after.get(addr) ?? 0n) - (before.get(addr) ?? 0n);
+  const dSol = delta(me), dUsdc = delta(usdcAta);
+  for (const a of watch.slice(2)) {
+    const addr = a.toBase58();
+    if (addr === usdcAta) continue;
+    if (delta(addr) < 0n && !(addr === wsolAta && intent.inputMint === SOL_MINT)) throw new Anomaly(`simulation: balance of her account ${addr} would drop`);
+  }
+  const value = intent.inUsd * MIN_VALUE_RETURNED;
+  if (intent.inputMint === USDC_MINT) {
+    if (-dUsdc > intent.inAmountRaw) throw new Anomaly(`simulation: ${Number(-dUsdc) / 1e6} USDC would leave, intended ${Number(intent.inAmountRaw) / 1e6}`);
+    const wsolGain = delta(wsolAta) > 0n ? delta(wsolAta) : 0n;   // output may stay wrapped
+    const solGotUsd = (Number(dSol + wsolGain) + fee) / 1e9 * intent.solPrice;
+    if (solGotUsd < value) throw new Anomaly(`simulation: only ≈${round(solGotUsd, 3)} USD of SOL would come back for ${round(intent.inUsd, 3)} USD`);
+  } else {
+    if (-dSol > intent.inAmountRaw + BigInt(SOL_IN_MARGIN_LAMPORTS)) throw new Anomaly(`simulation: ${Number(-dSol) / 1e9} SOL would leave, intended ${Number(intent.inAmountRaw) / 1e9}`);
+    if (dUsdc < 0n) throw new Anomaly("simulation: USDC would drop on a SOL sale");
+    if (Number(dUsdc) / 1e6 < value) throw new Anomaly(`simulation: only ${Number(dUsdc) / 1e6} USDC would come back for ${round(intent.inUsd, 3)} USD`);
+  }
+  return { feeLamports: fee, programs: [...new Set(programs)] };
+}
+
+// Jupiter Swap V2: /order, checks against the intention, sign, /execute, then the on-chain status decides.
+export async function swapV2(
+  connection: Connection, keypair: Keypair, inputMint: string, outputMint: string, amountRaw: number,
+  solBalance: number, solPrice: number, ownTokenAccounts: PublicKey[], opts: { send: boolean } = { send: true },
+): Promise<SwapResult> {
+  const orderedAt = Date.now();
   const order = await jup(`/swap/v2/order?inputMint=${inputMint}&outputMint=${outputMint}&amount=${Math.floor(amountRaw)}&taker=${keypair.publicKey.toBase58()}&slippageBps=100`);
   if (!order?.transaction) throw new Error(`no transaction: ${order?.errorMessage ?? order?.error ?? "unknown"}`);
+  if (order.inputMint && order.inputMint !== inputMint) throw new Anomaly(`order input ${order.inputMint} ≠ ${inputMint}`);
+  if (order.outputMint && order.outputMint !== outputMint) throw new Anomaly(`order output ${order.outputMint} ≠ ${outputMint}`);
+  if (order.inAmount && BigInt(order.inAmount) > BigInt(Math.floor(amountRaw))) throw new Anomaly(`order spends ${order.inAmount}, intended ${Math.floor(amountRaw)}`);
   const impact = Math.abs(Number(order.priceImpact ?? 0));
   if (impact > MAX_PRICE_IMPACT_PCT) throw new Error(`price impact ${round(impact, 3)}% > ${MAX_PRICE_IMPACT_PCT}%`);
   if (Number(order.slippageBps ?? 0) > MAX_SLIPPAGE_BPS) throw new Error(`slippage ${order.slippageBps} bps > ${MAX_SLIPPAGE_BPS}`);
@@ -257,21 +434,38 @@ async function swapV2(keypair: Keypair, inputMint: string, outputMint: string, a
   }
   if (!order.gasless && solBalance < MIN_SOL_FOR_FEES) throw new Error(`not enough SOL for fees (${solBalance})`);
   const tx = VersionedTransaction.deserialize(Buffer.from(order.transaction, "base64"));
+  const intentUsd = Number.isFinite(inUsd) && inUsd > 0 ? inUsd : (inputMint === USDC_MINT ? amountRaw / 1e6 : amountRaw / 1e9 * solPrice);
+  const checked = await inspectSwap(connection, keypair.publicKey, tx, ownTokenAccounts,
+    { inputMint, outputMint, inAmountRaw: BigInt(Math.floor(amountRaw)), inUsd: intentUsd, solPrice, gasless: !!order.gasless });
+  const base = { inAmount: String(order.inAmount ?? amountRaw), outAmount: String(order.outAmount ?? ""), priceImpact: impact, router: String(order.router ?? ""),
+    inUsd: Number.isFinite(inUsd) ? inUsd : null, outUsd: Number.isFinite(outUsd) ? outUsd : null, programs: checked.programs };
+  if (!opts.send) return { ...base, status: "unknown", signature: null, detail: "checked and simulated only — not signed, not sent", feeLamports: checked.feeLamports };
+  if (Date.now() - orderedAt > ORDER_MAX_AGE_MS) throw new Error("quote is stale — not sent");
+
   tx.sign([keypair]);
-  const exec = await jup(`/swap/v2/execute`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ signedTransaction: Buffer.from(tx.serialize()).toString("base64"), requestId: order.requestId }),
-  });
-  if (exec?.status !== "Success") throw new Error(`execute ${exec?.status ?? "failed"}: ${exec?.error ?? exec?.code ?? ""} ${exec?.signature ?? ""}`.trim());
-  return {
-    signature: exec.signature, inAmount: String(exec.inputAmountResult ?? order.inAmount), outAmount: String(exec.outputAmountResult ?? order.outAmount),
-    priceImpact: impact, router: String(order.router ?? ""), inUsd: Number.isFinite(inUsd) ? inUsd : null, outUsd: Number.isFinite(outUsd) ? outUsd : null,
-  };
+  const decode58 = (bs58 as any).default?.encode ?? (bs58 as any).encode;
+  const signature: string = decode58(tx.signatures[0]);
+  writePending({ signature, kind: "swap", inputMint, outputMint, amountRaw: Math.floor(amountRaw) });
+  let execStatus = "no answer";
+  try {
+    const exec = await jup(`/swap/v2/execute`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ signedTransaction: Buffer.from(tx.serialize()).toString("base64"), requestId: order.requestId }),
+    });
+    execStatus = String(exec?.status ?? "no status");
+    if (exec?.outputAmountResult) base.outAmount = String(exec.outputAmountResult);
+    if (exec?.inputAmountResult) base.inAmount = String(exec.inputAmountResult);
+  } catch (err) { execStatus = `error: ${String(err instanceof Error ? err.message : err).slice(0, 120)}`; }
+  const s = await settle(connection, signature, tx.message.recentBlockhash);
+  const inconsistent = (s.status === "executed" && execStatus !== "Success") || (s.status !== "executed" && execStatus === "Success");
+  clearPending();
+  return { ...base, status: inconsistent && s.status !== "executed" ? "unknown" : s.status, signature, feeLamports: s.feeLamports,
+    detail: `${s.detail}; jupiter said: ${execStatus}${inconsistent ? " — INCONSISTENT" : ""}` };
 }
 
 // USDC to WeWilder: a plain SPL TransferChecked into WeWilder's existing USDC account.
-async function sendUsdcToWeWilder(connection: Connection, keypair: Keypair, amountUsdc: number): Promise<string> {
+// Simulated before sending; the on-chain status decides afterwards.
+async function sendUsdcToWeWilder(connection: Connection, keypair: Keypair, amountUsdc: number): Promise<Settled> {
   const dest = process.env.WEWILDER_ADDRESS;
   if (!dest) throw new Error("WEWILDER_ADDRESS not set");
   const mint = new PublicKey(USDC_MINT);
@@ -279,9 +473,10 @@ async function sendUsdcToWeWilder(connection: Connection, keypair: Keypair, amou
   const target = ata(new PublicKey(dest), mint);
   if (!(await connection.getAccountInfo(source))) throw new Error("own USDC account not found");
   if (!(await connection.getAccountInfo(target))) throw new Error("WeWilder has no USDC account yet — nothing sent");
+  const raw = BigInt(Math.floor(amountUsdc * 1_000_000));
   const data = Buffer.alloc(10);
   data.writeUInt8(12, 0);
-  data.writeBigUInt64LE(BigInt(Math.floor(amountUsdc * 1_000_000)), 1);
+  data.writeBigUInt64LE(raw, 1);
   data.writeUInt8(6, 9);
   const ix = new TransactionInstruction({
     programId: TOKEN_PROGRAM_ID,
@@ -296,10 +491,37 @@ async function sendUsdcToWeWilder(connection: Connection, keypair: Keypair, amou
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
   const tx = new Transaction({ feePayer: keypair.publicKey, blockhash, lastValidBlockHeight }).add(ix);
   tx.sign(keypair);
-  const signature = await connection.sendRawTransaction(tx.serialize());
-  const conf = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
-  if (conf.value.err) throw new Error(`transaction reverted: ${JSON.stringify(conf.value.err)} (${signature})`);
-  return signature;
+  const sim = await connection.simulateTransaction(tx);
+  if (sim.value.err) throw new Error(`simulation failed: ${JSON.stringify(sim.value.err)} — not sent`);
+  const decode58 = (bs58 as any).default?.encode ?? (bs58 as any).encode;
+  const signature: string = decode58(tx.signature!);
+  writePending({ signature, kind: "gift", amountUsdc, destination: dest });
+  try { await connection.sendRawTransaction(tx.serialize()); } catch { /* the status check below decides */ }
+  const s = await settle(connection, signature, blockhash);
+  clearPending();
+  return s;
+}
+
+// For test-trade-check.ts: builds and checks a real order, simulates it, never signs or sends.
+export async function checkTradeOnly(inputSymbol: "USDC" | "SOL", amount: number): Promise<string> {
+  const connection = getConnection();
+  const keypair = getKeypair();
+  const allow = await verifiedAllowlist();
+  const solPrice = allow.get(SOL_MINT)?.usdPrice;
+  if (!solPrice) throw new Error("no SOL price");
+  const held = await holdings(connection, keypair.publicKey);
+  const own = await ownTokenAccounts(connection, keypair.publicKey);
+  const [inMint, outMint, raw] = inputSymbol === "USDC" ? [USDC_MINT, SOL_MINT, amount * 1e6] : [SOL_MINT, USDC_MINT, (amount / solPrice) * 1e9];
+  const r = await swapV2(connection, keypair, inMint, outMint, raw, held.sol, solPrice, own, { send: false });
+  return `ok: ${amount} USD ${inputSymbol} → ${inputSymbol === "USDC" ? "SOL" : "USDC"} passed all checks and the simulation.\nprograms: ${r.programs.join(", ")}\nnetwork fee ≈ ${(r.feeLamports ?? 0) / 1e9} SOL, price impact ${r.priceImpact}%, router ${r.router}\n(nothing was signed or sent)`;
+}
+
+async function ownTokenAccounts(connection: Connection, owner: PublicKey): Promise<PublicKey[]> {
+  const out: PublicKey[] = [];
+  for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_ID]) {
+    try { out.push(...(await connection.getTokenAccountsByOwner(owner, { programId })).value.map((a) => a.pubkey)); } catch { /* none */ }
+  }
+  return out;
 }
 
 // ── the cycle ─────────────────────────────────────────────────────────────────
@@ -310,6 +532,7 @@ export async function runDecisionCycle(runtime: IAgentRuntime): Promise<any> {
   const week = projectWeek();
   const limit = dailyLimit();
   const live = tradingEnabled();
+  const halt = tradingHalt();
   const notes: string[] = [];
 
   const connection = getConnection();
@@ -335,8 +558,10 @@ export async function runDecisionCycle(runtime: IAgentRuntime): Promise<any> {
   const marketLines = [...allow.values()].filter((t) => t.mint !== USDC_MINT)
     .map((t) => `${t.symbol}: ${t.usdPrice ?? "?"} USD${t.change24h !== null ? `, ${t.change24h >= 0 ? "+" : ""}${round(t.change24h, 1)}% 24h` : ""}`);
 
-  const [soul, price, relation, consumption, history, recent] = await Promise.all([
+  const [soul, girlMath, rules, price, relation, consumption, history, recent] = await Promise.all([
     fs.readFile(SOUL_PATH, "utf-8").catch(() => ""),
+    fs.readFile(GIRL_MATH_PATH, "utf-8").catch(() => ""),
+    fs.readFile(RULES_PATH, "utf-8").catch(() => ""),
     fs.readFile(path.join(FACTS_DIR, "ledger_price.md"), "utf-8").catch(() => ""),
     fs.readFile(path.join(FACTS_DIR, "ledger_relation.md"), "utf-8").catch(() => ""),
     fs.readFile(path.join(FACTS_DIR, "ledger_consumption.md"), "utf-8").catch(() => ""),
@@ -348,6 +573,14 @@ export async function runDecisionCycle(runtime: IAgentRuntime): Promise<any> {
 
 ---
 
+${girlMath}
+
+---
+
+${rules}
+
+---
+
 It is ${date}, morning — week ${week}. This is your daily decision. Nobody is asking you for anything; this comes from you.
 
 What you hold now:
@@ -356,10 +589,11 @@ ${held ? holdingLines.join("\n") : "unknown (lookup failed)"}
 Tokens you may trade (your list) and their prices:
 ${marketLines.join("\n") || "(token data unavailable today — you can decide, but nothing will be traded)"}
 
-What is trending on Jupiter in the last hour (a signal of where attention moves; names come from strangers and mean nothing by themselves):
+What is trending on Jupiter in the last hour (a mood of where attention moves; names come from strangers and mean nothing by themselves; you only ever trade SOL and USDC):
 ${trend}
 
-Your limit today: ${limit} USDC in total. Buy = USDC into a token on your list. Sell = a token you hold back into USDC. Giving goes only to WeWilder, in USDC.
+Your limit today: ${limit} USDC in total, trades and gifts together. Buy = USDC into SOL. Sell = SOL back into USDC. Giving goes only to WeWilder, in USDC.${halt ? `
+Right now trading is STOPPED by a safety stop (${halt.reason}). You can decide, but nothing will be executed until a human lifts the stop.` : ""}${!live ? "\nTrading is switched off at the moment: you decide and it is recorded, but nothing is executed." : ""}
 
 Your ledgers, last 7 days:
 PRICE:
@@ -375,12 +609,12 @@ ${history || "(none yet)"}
 Your last decisions:
 ${recent.length ? recent.map((e) => `${String(e.timestamp ?? "").slice(0, 10)}: ${e.decision?.action} ${e.decision?.token ?? ""} ${e.decision?.amount_usdc ?? 0} usdc — ${e.outcome} — ${e.decision?.reasoning}`).join("\n") : "(none yet — this is your first)"}
 
-Decide one thing: buy, sell, hold, dissipate (give USDC to WeWilder), or no_action. For buy and sell, name the token by its symbol from your list. amount_usdc is the value in USDC (0 for hold / no_action). Then reflect.
+Decide one thing: buy, sell, hold, dissipate (give USDC to WeWilder), or no_action. For buy and sell, the token is SOL. amount_usdc is the value in USDC (0 for hold / no_action). Then reflect.
 
 Respond in JSON only:
 {
   "observation": { "pattern_type": "narrative_pump | coordinated_resonance | extraction_arbitrage | autonomous_operation", "token": "symbol or null", "signals": ["plain-language reasons this caught your attention"], "confidence": 0.0 },
-  "decision": { "action": "buy | sell | hold | dissipate | no_action", "token": "symbol from your list, or null", "amount_usdc": 0, "reasoning": "girl math, your own words", "girl_math_principle": "resonance_over_price | collective_survival | relative_axiom | dissipation_as_default | other" },
+  "decision": { "action": "buy | sell | hold | dissipate | no_action", "token": "symbol from your list, or null", "amount_usdc": 0, "reasoning": "girl math, your own words", "girl_math_principle": "resonance_over_price | collective_survival | relative_axiom | dissipation_as_default | other", "girl_math_rule": "which of your girl math principles you used, in your own words" },
   "resource_reflection": "answer to: this is what existing costs the physical world. what does that mean to you?",
   "financial_reflection": "answer to: does your financial logic make sense?",
   "reflection": "anything else, in your voice"
@@ -421,19 +655,41 @@ Respond in JSON only:
   let outcome = "no_on_chain_effect";
   let signature: string | null = null;
   let trade: SwapResult | null = null;
+  let feeLamports: number | null = null;
+  let statusDetail: string | null = null;
   if (isMove && tokenOk && amount >= MIN_TRADE_USDC) {
     if (!live) notes.push("dry run — TRADING_ENABLED is not true");
+    else if (halt) { outcome = "halted"; notes.push(`trading stopped since ${halt.at} (${halt.reason}) — nothing executed`); }
     else {
       try {
         const keypair = getKeypair();
-        if (action === "buy" && token) trade = await swapV2(keypair, USDC_MINT, token.mint, amount * 1e6, held?.sol ?? 0);
-        if (action === "sell" && token) trade = await swapV2(keypair, token.mint, USDC_MINT, (amount / (token.usdPrice as number)) * 10 ** token.decimals, held?.sol ?? 0);
-        if (action === "dissipate") signature = await sendUsdcToWeWilder(connection, keypair, amount);
-        if (trade) signature = trade.signature;
-        outcome = "executed";
+        const own = await ownTokenAccounts(connection, owner);
+        const solPrice = allow.get(SOL_MINT)?.usdPrice ?? 0;
+        if (action === "buy" && token) trade = await swapV2(connection, keypair, USDC_MINT, token.mint, amount * 1e6, held?.sol ?? 0, solPrice, own);
+        if (action === "sell" && token) trade = await swapV2(connection, keypair, token.mint, USDC_MINT, (amount / (token.usdPrice as number)) * 10 ** token.decimals, held?.sol ?? 0, solPrice, own);
+        let s: { status: string; signature: string | null; feeLamports: number | null; detail: string } | null = trade;
+        if (action === "dissipate") s = await sendUsdcToWeWilder(connection, keypair, amount);
+        if (s) {
+          signature = s.signature; feeLamports = s.feeLamports; statusDetail = s.detail;
+          if (s.status === "executed") outcome = "executed";
+          else if (s.status === "failed") { outcome = "failed"; notes.push(`failed, no funds moved beyond fees (${s.detail}) — next attempt at the earliest tomorrow`); }
+          else {
+            outcome = "unknown";
+            notes.push(`status unknown (${s.detail}) — trading stopped`);
+            await haltAndAlert(`transaction status unknown after the morning ${action}`, "decision-cycle",
+              `${action} ${amount} USDC${token ? " " + token.symbol : ""}\n${s.detail}\n${signature ? "https://solscan.io/tx/" + signature : ""}`, runtime.logger as any);
+          }
+        }
       } catch (err) {
-        outcome = "reverted";
-        notes.push(String(err instanceof Error ? err.message : err).slice(0, 300));
+        const msg = String(err instanceof Error ? err.message : err).slice(0, 300);
+        if (err instanceof Anomaly) {
+          outcome = "rejected";
+          notes.push(`rejected before signing: ${msg} — trading stopped`);
+          await haltAndAlert(`transaction did not match her intention: ${msg}`, "decision-cycle", `${action} ${amount} USDC${token ? " " + token.symbol : ""} — nothing was signed`, runtime.logger as any);
+        } else {
+          outcome = "not_sent";
+          notes.push(msg);
+        }
       }
     }
   }
@@ -464,10 +720,11 @@ Respond in JSON only:
       executed_amount_usdc: outcome === "executed" ? amount : 0,
       reasoning: d?.decision?.reasoning ?? "",
       girl_math_principle: d?.decision?.girl_math_principle ?? "other",
+      girl_math_rule: d?.decision?.girl_math_rule ?? "",
     },
     outcome,
     signature,
-    trade: trade ? { in_amount_raw: trade.inAmount, out_amount_raw: trade.outAmount, in_usd: trade.inUsd, out_usd: trade.outUsd, price_impact_pct: trade.priceImpact, router: trade.router } : null,
+    trade: trade ? { in_amount_raw: trade.inAmount, out_amount_raw: trade.outAmount, in_usd: trade.inUsd, out_usd: trade.outUsd, price_impact_pct: trade.priceImpact, router: trade.router, programs: trade.programs } : null,
     resource_facts: { transactions_this_session: outcome === "executed" ? 1 : 0, estimated_kwh: cons.kwh, estimated_water_litres: cons.water },
     resource_reflection: d?.resource_reflection ?? "",
     financial_state: {
@@ -488,7 +745,7 @@ Respond in JSON only:
     farcaster_post: "no post this session",
     farcaster_input: null,
     market_context: { trending_1h: trend.split("\n").slice(0, 15), tradeable: [...allow.values()].map((t) => t.symbol) },
-    execution: { trading_enabled: live, daily_limit_usdc: limit, notes },
+    execution: { trading_enabled: live, trading_halted: halt ? { since: halt.at, reason: halt.reason } : null, daily_limit_usdc: limit, fee_lamports: feeLamports, status_detail: statusDetail, rules: "transaction_rules.md v2", notes },
   };
 
   await fs.mkdir(LOG_DIR, { recursive: true });
@@ -514,12 +771,21 @@ Respond in JSON only:
 
 export const decisionCyclePlugin: Plugin = {
   name: "decision-cycle",
-  description: "Daily decision at 07:00 Vienna: buy, sell, hold or give — allowlisted tokens only, Jupiter trending as signal, hard limits in code. Never triggered by messages.",
+  description: "Daily decision at 07:00 Vienna: buy, sell, hold or give — SOL/USDC only, checks before signing and on-chain status after sending (transaction_rules.md v2), stop on anything unexpected. Never triggered by messages.",
   actions: [],
   async init(_config: Record<string, string>, runtime: IAgentRuntime) {
     if (!fsSync.existsSync(STATE_PATH)) {
       const { date, hour } = viennaNow();
       if (hour >= DECISION_HOUR) fsSync.writeFileSync(STATE_PATH, JSON.stringify({ date }));
+    }
+    // A transaction in flight when the process stopped: its status is unknown -> stop.
+    if (fsSync.existsSync(PENDING_PATH)) {
+      let p: any = {};
+      try { p = JSON.parse(fsSync.readFileSync(PENDING_PATH, "utf-8")); } catch { /* unreadable */ }
+      await haltAndAlert("a transaction was in flight when The Girl restarted — status not checked", "decision-cycle",
+        `${p.kind ?? "transaction"} from ${p.at ?? "?"}
+${p.signature ? "https://solscan.io/tx/" + p.signature : ""}
+Check it on Solscan, then delete assets/pending_transaction.json and the stop.`, runtime.logger as any);
     }
     let running = false;
     async function check() {

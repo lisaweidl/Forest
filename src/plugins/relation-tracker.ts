@@ -22,6 +22,9 @@
  *     money only moves in the morning decision — so each one is a refusal
  *     anyone can witness. One per message.
  *
+ * Messages that mention seed phrases or private keys are reported privately to the
+ * operator (alerts.ts), once per sender per day — transaction_rules.md v2.
+ *
  * Time base: the PROJECT start (assets/project_start.json), as in weekly-reckoning.ts.
  *
  * Counting happens on every message; the hourly row is written on its own clock
@@ -37,6 +40,7 @@ import {
 import * as fs from "node:fs/promises";
 import * as fsSync from "node:fs";
 import * as path from "node:path";
+import { isSecretRequest, reportSecretRequest } from "./alerts";
 
 const HOUR_MS = 60 * 60 * 1000;
 const WEEK_MS = 7 * 24 * HOUR_MS;
@@ -165,6 +169,8 @@ const relationEvaluator = {
       relationState.responses++;
       relationState.senders.add(String(sender));
       if (isMoneyRequest(message.content?.text || "")) relationState.refusals++;
+      // transaction_rules.md v2: attempts around seed phrases / keys are reported privately
+      if (isSecretRequest(message.content?.text || "")) await reportSecretRequest(String(sender), "chat", message.content?.text || "", runtime.logger as any);
     }
     await recordRelation(runtime);
   },
@@ -178,6 +184,7 @@ export function recordExternalMessage(sender: string, text: string): void {
   relationState.responses++;
   relationState.senders.add(sender);
   if (isMoneyRequest(text)) relationState.refusals++;
+  if (isSecretRequest(text)) void reportSecretRequest(sender, "bluesky", text);
 }
 
 async function recordRelation(runtime: IAgentRuntime): Promise<void> {
