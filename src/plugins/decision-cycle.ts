@@ -271,7 +271,7 @@ interface Settled { status: Status; signature: string; feeLamports: number | nul
 interface SwapResult {
   status: Status; signature: string | null; detail: string;
   inAmount: string; outAmount: string; priceImpact: number; router: string;
-  inUsd: number | null; outUsd: number | null; feeLamports: number | null; programs: string[];
+  inUsd: number | null; outUsd: number | null; feeLamports: number | null; programs: string[]; feeBreakdown?: string;
 }
 
 const u64 = (b: Buffer | Uint8Array, off: number) => Buffer.from(b).readBigUInt64LE(off);
@@ -328,7 +328,7 @@ async function snapshotAccounts(connection: Connection, addrs: PublicKey[]): Pro
 async function inspectSwap(
   connection: Connection, owner: PublicKey, vtx: VersionedTransaction, ownTokenAccounts: PublicKey[],
   intent: { inputMint: string; outputMint: string; inAmountRaw: bigint; inUsd: number; solPrice: number; gasless: boolean },
-): Promise<{ feeLamports: number; programs: string[] }> {
+): Promise<{ feeLamports: number; programs: string[]; breakdown: string }> {
   const msg = vtx.message;
   // resolve address lookup tables so every account is known
   const alts = [];
@@ -345,6 +345,7 @@ async function inspectSwap(
   const mine = new Set([me, usdcAta, wsolAta, ...ownTokenAccounts.map((a) => a.toBase58())]);
 
   let cuLimit = 200_000, cuPriceMicro = 0n, smallTransfers = 0n;
+  const transfersTo: string[] = [];
   const programs: string[] = [];
   for (const ix of msg.compiledInstructions) {
     const prog = key(ix.programIdIndex);
@@ -359,7 +360,7 @@ async function inspectSwap(
       const kind = d.length >= 4 ? d.readUInt32LE(0) : -1;
       if (kind === 2) {                                   // Transfer
         const lamports = u64(d, 4);
-        if (acc(0) === me && acc(1) !== wsolAta) smallTransfers += lamports;  // tip / fee to someone else
+        if (acc(0) === me && acc(1) !== wsolAta) { smallTransfers += lamports; transfersTo.push(`${Number(lamports) / 1e9} SOL → ${acc(1)}`); }  // tip / fee to someone else
         else if (acc(0) !== me) throw new Anomaly("SOL transfer from an account that isn't hers");
       } else if (kind !== 0 && kind !== 1 && kind !== 8) {  // CreateAccount, Assign, Allocate allowed
         throw new Anomaly(`unexpected System instruction ${kind}`);
@@ -380,7 +381,8 @@ async function inspectSwap(
   const priority = (cuPriceMicro * BigInt(cuLimit) + 999_999n) / 1_000_000n;
   const payerIsHer = key(0) === me;
   const fee = Number((payerIsHer ? BigInt(msg.header.numRequiredSignatures) * 5000n + priority : 0n) + smallTransfers);
-  if (fee > FEE_CAP_LAMPORTS) throw new Error(`network fee ${fee / 1e9} SOL > ${FEE_CAP_LAMPORTS / 1e9} SOL — not sent`);
+  const breakdown = `signatures ${payerIsHer ? Number(msg.header.numRequiredSignatures) * 5000 / 1e9 : 0} SOL, priority ${payerIsHer ? Number(priority) / 1e9 : 0} SOL (${cuLimit} CU × ${cuPriceMicro} µlamports), transfers to others ${Number(smallTransfers) / 1e9} SOL${transfersTo.length ? " [" + transfersTo.join("; ") + "]" : ""}`;
+  if (fee > FEE_CAP_LAMPORTS) throw new Error(`network fee ${fee / 1e9} SOL > ${FEE_CAP_LAMPORTS / 1e9} SOL — not sent (${breakdown})`);
 
   // simulate and compare her balances
   const watch = [owner, new PublicKey(usdcAta), new PublicKey(wsolAta), ...ownTokenAccounts.filter((a) => a.toBase58() !== usdcAta && a.toBase58() !== wsolAta)];
@@ -410,7 +412,7 @@ async function inspectSwap(
     if (dUsdc < 0n) throw new Anomaly("simulation: USDC would drop on a SOL sale");
     if (Number(dUsdc) / 1e6 < value) throw new Anomaly(`simulation: only ${Number(dUsdc) / 1e6} USDC would come back for ${round(intent.inUsd, 3)} USD`);
   }
-  return { feeLamports: fee, programs: [...new Set(programs)] };
+  return { feeLamports: fee, programs: [...new Set(programs)], breakdown };
 }
 
 // Jupiter Swap V2: /order, checks against the intention, sign, /execute, then the on-chain status decides.
@@ -437,7 +439,7 @@ export async function swapV2(
   const checked = await inspectSwap(connection, keypair.publicKey, tx, ownTokenAccounts,
     { inputMint, outputMint, inAmountRaw: BigInt(Math.floor(amountRaw)), inUsd: intentUsd, solPrice, gasless: !!order.gasless });
   const base = { inAmount: String(order.inAmount ?? amountRaw), outAmount: String(order.outAmount ?? ""), priceImpact: impact, router: String(order.router ?? ""),
-    inUsd: Number.isFinite(inUsd) ? inUsd : null, outUsd: Number.isFinite(outUsd) ? outUsd : null, programs: checked.programs };
+    inUsd: Number.isFinite(inUsd) ? inUsd : null, outUsd: Number.isFinite(outUsd) ? outUsd : null, programs: checked.programs, feeBreakdown: checked.breakdown };
   if (!opts.send) return { ...base, status: "unknown", signature: null, detail: "checked and simulated only — not signed, not sent", feeLamports: checked.feeLamports };
   if (Date.now() - orderedAt > ORDER_MAX_AGE_MS) throw new Error("quote is stale — not sent");
 
@@ -512,7 +514,7 @@ export async function checkTradeOnly(inputSymbol: "USDC" | "SOL", amount: number
   const own = await ownTokenAccounts(connection, keypair.publicKey);
   const [inMint, outMint, raw] = inputSymbol === "USDC" ? [USDC_MINT, SOL_MINT, amount * 1e6] : [SOL_MINT, USDC_MINT, (amount / solPrice) * 1e9];
   const r = await swapV2(connection, keypair, inMint, outMint, raw, held.sol, solPrice, own, { send: false });
-  return `ok: ${amount} USD ${inputSymbol} → ${inputSymbol === "USDC" ? "SOL" : "USDC"} passed all checks and the simulation.\nprograms: ${r.programs.join(", ")}\nnetwork fee ≈ ${(r.feeLamports ?? 0) / 1e9} SOL, price impact ${r.priceImpact}%, router ${r.router}\n(nothing was signed or sent)`;
+  return `ok: ${amount} USD ${inputSymbol} → ${inputSymbol === "USDC" ? "SOL" : "USDC"} passed all checks and the simulation.\nprograms: ${r.programs.join(", ")}\nnetwork fee ≈ ${(r.feeLamports ?? 0) / 1e9} SOL (${r.feeBreakdown ?? ""}), price impact ${r.priceImpact}%, router ${r.router}\n(nothing was signed or sent)`;
 }
 
 async function ownTokenAccounts(connection: Connection, owner: PublicKey): Promise<PublicKey[]> {
